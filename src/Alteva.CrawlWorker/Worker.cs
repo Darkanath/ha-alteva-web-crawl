@@ -29,7 +29,6 @@ public class Worker : BackgroundService
 
     private IConnection? _connection;
     private IModel? _channel;
-    private const int MaxRetryAttempts = 3;
 
     public Worker(
         IOptions<RabbitMQOptions> rabbitOptions,
@@ -88,13 +87,14 @@ public class Worker : BackgroundService
     {
         var deliveryTag = ea.DeliveryTag;
         string rawJson = string.Empty;
+        CrawlJobRequestedMessage? message = null;
 
         try
         {
             rawJson = Encoding.UTF8.GetString(ea.Body.ToArray());
             _logger.LogInformation("Received crawl job message. DeliveryTag={DeliveryTag}, Length={Length}", deliveryTag, rawJson.Length);
 
-            var message = JsonSerializer.Deserialize<CrawlJobRequestedMessage>(rawJson, new JsonSerializerOptions
+            message = JsonSerializer.Deserialize<CrawlJobRequestedMessage>(rawJson, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });
@@ -126,7 +126,16 @@ public class Worker : BackgroundService
                 return;
             }
 
-            // Transition Job to Running
+            // Reset the retry counter only for a genuinely fresh dispatch (Pending, or a
+            // re-run after a prior terminal state). A redelivery of a message that is
+            // already Running belongs to the SAME retry sequence started above, so the
+            // counter must be left alone here or every requeued redelivery would wipe
+            // it back to 0 and the retry limit could never be reached.
+            if (job.Status != JobStatus.Running)
+            {
+                job.RetryCount = 0;
+            }
+
             job.Status = JobStatus.Running;
             job.StartedAt = DateTime.UtcNow;
             await dbContext.SaveChangesAsync(stoppingToken);
@@ -192,35 +201,53 @@ public class Worker : BackgroundService
         {
             _logger.LogError(ex, "Unhandled exception processing delivery {DeliveryTag}.", deliveryTag);
 
-            var retryCount = GetRetryCount(ea.BasicProperties);
-            if (retryCount >= MaxRetryAttempts)
+            if (message == null || message.JobId == Guid.Empty)
             {
-                _logger.LogError("Job delivery {DeliveryTag} exceeded max retry attempts ({MaxRetryAttempts}). Routing to DLQ.",
-                    deliveryTag, MaxRetryAttempts);
+                // Can't identify which Job this delivery belongs to, so there is no
+                // row to track a retry count on. Route straight to DLQ rather than
+                // requeueing a message we can never make progress on.
+                _logger.LogError("Delivery {DeliveryTag} could not be attributed to a Job. Routing to DLQ.", deliveryTag);
+                _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
+                return;
+            }
+
+            // The primary queue is a classic queue, so RabbitMQ never populates the
+            // x-delivery-count header on redelivery. Track attempts on the Job row
+            // itself instead so the retry budget survives across redeliveries.
+            using var retryScope = _scopeFactory.CreateScope();
+            var retryDbContext = retryScope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var retryTracker = retryScope.ServiceProvider.GetRequiredService<IRetryTracker>();
+            var retryCount = await retryTracker.RegisterFailureAsync(message.JobId, stoppingToken);
+
+            if (retryTracker.IsExhausted(retryCount))
+            {
+                _logger.LogError("Job {JobId} delivery {DeliveryTag} exceeded max retry attempts ({MaxRetryAttempts}). Routing to DLQ.",
+                    message.JobId, deliveryTag, retryTracker.MaxRetryAttempts);
+
+                // Mark the Job as Failed so it doesn't stay stuck in Running forever
+                // now that the message is being routed to the DLQ instead of retried.
+                var failedJob = await retryDbContext.Jobs.FirstOrDefaultAsync(j => j.Id == message.JobId, stoppingToken);
+                if (failedJob != null)
+                {
+                    failedJob.Status = JobStatus.Failed;
+                    failedJob.CompletedAt = DateTime.UtcNow;
+                    failedJob.FailureReason = $"Exceeded max retry attempts ({retryTracker.MaxRetryAttempts}) after repeated transient failures: {ex.Message}";
+                    await retryDbContext.SaveChangesAsync(stoppingToken);
+                }
 
                 // Reject with requeue=false so RabbitMQ routes to Dead Letter Queue
                 _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
             }
             else
             {
-                _logger.LogWarning("Job delivery {DeliveryTag} encountered transient failure (attempt {Attempt}/{MaxAttempts}). Requeuing.",
-                    deliveryTag, retryCount + 1, MaxRetryAttempts);
+                _logger.LogWarning("Job {JobId} delivery {DeliveryTag} encountered transient failure (attempt {Attempt}/{MaxAttempts}). Requeuing.",
+                    message.JobId, deliveryTag, retryCount, retryTracker.MaxRetryAttempts);
 
                 // Increment retry delay before requeue
-                await Task.Delay(TimeSpan.FromSeconds(2 * (retryCount + 1)), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(2 * retryCount), stoppingToken);
                 _channel?.BasicNack(deliveryTag, multiple: false, requeue: true);
             }
         }
-    }
-
-    private static int GetRetryCount(IBasicProperties? properties)
-    {
-        if (properties?.Headers != null && properties.Headers.TryGetValue("x-delivery-count", out var countObj))
-        {
-            if (countObj is long l) return (int)l;
-            if (countObj is int i) return i;
-        }
-        return 0;
     }
 
     private void DeclareTopology(IModel channel, RabbitMQOptions options)
