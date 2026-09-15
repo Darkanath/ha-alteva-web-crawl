@@ -54,7 +54,7 @@ gantt
 ---
 
 ## Milestone 3: Event-Driven Worker Pipeline & Idempotent Persistence
-- **Status:** Complete (100%)
+- **Status:** Complete (100%) — **superseded by Milestone 6** (the job-level in-memory BFS described here was replaced by a recursive one-page-per-message crawl).
 - **Target:** Reliable message consumption, automated retries for transient HTTP/DB failures, dead-letter queue (DLQ) handling, and idempotent writes.
 - **Key Deliverables:**
   - RabbitMQ consumer service (`Worker`) with prefetch limit (`BasicQos(0, 1, false)`) and explicit acknowledgments (`ack` / `nack`).
@@ -84,3 +84,19 @@ gantt
   - Correlation IDs (`jobId`) across logs.
   - Validated `docker-compose.yml` running SQL Server, RabbitMQ, API, and Worker together.
   - Final project README covering run instructions, architecture choices, trade-offs, and future improvements.
+
+---
+
+## Milestone 6: Recursive Page Crawl Refactor (`feat/recursive-page-crawl`)
+- **Status:** Complete (100%)
+- **Target:** One RabbitMQ message per page, recursively to the requested depth; sequential and polite; robust to redelivery, crashes, cancellation and infrastructure outages.
+- **Key Deliverables:**
+  - **Phase 1 — Contract & schema:** `CrawlPageMessage`, `PageStatus`, page crawl state, `(JobId, UrlHash)` unique key (SHA-256; avoids the 1700-byte index limit).
+  - **Sequential crawling:** removed all semaphores/parallelism; random 3–5 s politeness delay before every download.
+  - **Phase 2 — Infrastructure:** `CrawlStateStore` (transactional page commit, claims, completion, cancel), publisher confirms, shared RabbitMQ topology.
+  - **Phase 3 — Recursion:** `PageCrawlHandler` + `PageCrawler`; worker acks after commit and confirmed child publishes; cancellation aborts the in-flight page within ~1 s.
+  - **Phase 4 — API & UI:** atomic cancel, 503 + `Failed` job when the root cannot be queued, progress counts and progress bar, breadth-first tree (each page once, page status).
+  - **Requirement gaps:** HTTP retries for transient failures (408/429/5xx/network/timeout, `Retry-After`); worker `/health` (RabbitMQ consumer + database).
+  - **Phase 5 — Failure policy:** infrastructure failures requeue with a 10 s delay instead of dead-lettering; DLQ holds only malformed messages; dropped `Job.RetryCount`.
+  - **Phase 6 — Hardening & delivery:** link resolution against the fetched URL, entity decoding, percent-encoding preserved; README per requirements; end-to-end verification on Docker Compose (see `architecture_notes.md` §8).
+  - 108 .NET tests and 9 frontend tests passing.

@@ -3,7 +3,7 @@
 - **Project:** Alteva Web Crawler System
 - **Tracking Directory:** `dev_content/`
 - **Last Updated:** 2026-09-15
-- **Status:** Describes the **recursive page crawl** being built on `feat/recursive-page-crawl`. See [§8 Implementation Status](#8-implementation-status) for what is already in code.
+- **Status:** Describes the implemented **recursive page crawl** (branch `feat/recursive-page-crawl`). See [§8 Implementation Status](#8-implementation-status).
 
 ---
 
@@ -266,9 +266,9 @@ Unit and integration tests run in isolation — no network, no Docker. Persisten
 
 ```
 tests/
-├── Alteva.Domain.UnitTests/         # 42 tests: UrlNormalizer, UrlHasher, DomainLinkRatio, JobTreeBuilder (each page once, dense sites stay linear)
+├── Alteva.Domain.UnitTests/         # 45 tests: UrlNormalizer (incl. percent-encoding), UrlHasher, DomainLinkRatio, JobTreeBuilder (each page once, dense sites stay linear)
 ├── Alteva.Infrastructure.Tests/     # 18 tests: CrawlStateStore flow, cancel & fail, unique indexes, message serialization (SQLite)
-├── Alteva.CrawlWorker.Tests/        # 22 tests: recursive crawl over a fake FIFO queue, depth/page limits, politeness delay, HTTP retries (5xx, network error, 429 Retry-After, no retry on 4xx), cancellation (queued, during delay, during download), redelivery, health checks, link extraction
+├── Alteva.CrawlWorker.Tests/        # 26 tests: recursive crawl over a fake FIFO queue, depth/page limits, relative links after redirects, politeness delay, HTTP retries (5xx, network error, 429 Retry-After, no retry on 4xx), cancellation (queued, during delay, during download), redelivery, fail-page outcomes, health checks, link extraction (incl. entity decoding)
 └── Alteva.CrawlApi.Tests/           # 19 tests: request validation, create (incl. 503 on publish failure), progress, tree, cancel
 frontend/
 └── src/utils/crawlerUtils.test.ts   # 9 tests: Vitest ratio formatting and status badges
@@ -288,14 +288,16 @@ frontend/
 | 4 | Cancel via `CrawlStateStore`; 503 + `Failed` job on publish failure; progress counts; breadth-first tree (each page once, page status, no ratio for unfinished pages); string enums in JSON; frontend progress bar and page status in tree; quieter EF/HttpClient logs; `DOTNET_ENVIRONMENT` for the worker | ✅ Done |
 | — | HTTP retries for transient failures; worker `/health` (RabbitMQ consumer + database) | ✅ Done |
 | 5 | Dropped `Job.RetryCount` (migration `DropJobRetryCount`); infrastructure failures requeue with a 10 s delay instead of dead-lettering; `FailPageOutcome`; worker database health check bounded to 3 s | ✅ Done |
-| 6 | Tests, docs, full end-to-end verification | Pending |
+| 6 | Link fixes (resolve against the fetched URL after redirects, decode href entities, keep percent-encoding); README per requirements; milestones/tasks refresh; full end-to-end run on a fresh database | ✅ Done |
 
-**Verified end to end** (`docker compose`, local fixture site): depth-2 crawl with correct depths, ratios, edges and 3–5 s sequential downloads; root 404 → job `Failed`; cancel during a hanging download aborted in ~1 s with 10 queued messages discarded in ~20 ms and pages `Skipped`; malformed and old-contract messages dead-lettered; worker killed mid-page → message redelivered and crawl completed without duplicates; broker down on create → 503 and job `Failed`; broker restart → API publisher reconnects, worker restarts via its restart policy and resumes; transient HTTP errors retried (503×2 → Done, 500×3 → Failed, 429 honours `Retry-After`); SQL Server stopped for ~45 s mid-crawl → the in-flight page is requeued (not failed, not dead-lettered) and the job completes with all pages `Done`, while worker `/health` returns 503 within ~3 s.
+**Final end-to-end suite (Phase 6)** — fresh database, local fixture site, **16/16 checks passed**: migrations from scratch; both health endpoints; depth-2 crawl (8/8 progress, 8-node tree, ratios, statuses); sequential downloads 3.4–5.1 s apart; relative links after a redirect and `&amp;` decoding; root 404 fails without retry; 503→503→200 retried to success; persistent 500 fails after 3 attempts; 429 waits `Retry-After` (7.1 s); cancel aborts the in-flight page and discards all 10 queued messages (0 fetched, 11 pages `Skipped`); 3 malformed messages dead-lettered; worker killed mid-page → completed, 6 pages, 10 edges; broker down → 503 and `Failed` job, then recovery; SQL Server down mid-crawl → worker `/health` 503 in 3.2 s and the crawl completes with all 6 pages `Done`.
 
-**Deployment:** the old and new message contracts are incompatible — drain `alteva.crawl.jobs` before deploying Phase 3.
+**Earlier smoke tests** (`docker compose`, local fixture site): depth-2 crawl with correct depths, ratios, edges and 3–5 s sequential downloads; root 404 → job `Failed`; cancel during a hanging download aborted in ~1 s with 10 queued messages discarded in ~20 ms and pages `Skipped`; malformed and old-contract messages dead-lettered; worker killed mid-page → message redelivered and crawl completed without duplicates; broker down on create → 503 and job `Failed`; broker restart → API publisher reconnects, worker restarts via its restart policy and resumes; transient HTTP errors retried (503×2 → Done, 500×3 → Failed, 429 honours `Retry-After`); SQL Server stopped for ~45 s mid-crawl → the in-flight page is requeued (not failed, not dead-lettered) and the job completes with all pages `Done`, while worker `/health` returns 503 within ~3 s.
+
+**Deployment:** the page message contract replaced the old job-level one — drain `alteva.crawl.jobs` before upgrading an existing deployment.
 
 ### Known open issues
 - **No Docker healthchecks:** API (`:8080/health`) and worker (`:8081/health`) expose health endpoints, but the ASP.NET runtime image has no `curl`/`wget`, so `docker-compose.yml` defines no container healthchecks for them.
 - **Head-of-line blocking on persistent infrastructure failure:** a message whose failure is caused by a lasting infrastructure problem (or a bug that also breaks marking the page `Failed`) is retried every 10 s and blocks the single worker until fixed. Chosen over dead-lettering, which would strand the job.
 - **SSRF:** any http(s) URL is crawled, including private/internal addresses.
-- **Link handling:** hrefs are not HTML-entity-decoded, `<base href>` is ignored, redirects are followed off-domain, and `Uri.ToString()` unescapes percent-encoding.
+- **Link handling:** HTML is parsed with a regular expression, `<base href>` is ignored, redirects are followed to other hosts (the page is stored under the requested URL), and `robots.txt` is not consulted.

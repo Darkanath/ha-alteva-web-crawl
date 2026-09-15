@@ -33,8 +33,8 @@
 
 - [x] **Task 2.1: AppDbContext Model Configuration**
   - [x] Define entity mappings for SQL Server with appropriate field lengths.
-  - [x] Create unique composite index `(JobId, Url)` on `Pages` for idempotency.
-  - [x] Create unique composite index `(JobId, ParentUrl, ChildUrl)` on `Edges` for duplicate suppression.
+  - [x] Create unique composite index `(JobId, UrlHash)` on `Pages` for idempotency (was `(JobId, Url)`; see 8.1).
+  - [x] ~~Unique index `(JobId, ParentUrl, ChildUrl)` on `Edges`~~ — removed (exceeded SQL Server's key size); edges are de-duplicated per page (see 8.1).
   - [x] Configure cascading foreign keys from `Job` to `Pages` and `Edges`.
 - [x] **Task 2.2: Initial EF Core Migration**
   - [x] Generate initial migration for schema creation.
@@ -51,7 +51,7 @@
   - [x] Create `CreateCrawlJobRequest` with URL format and depth validation (`[Range(1, 10)]`).
   - [x] Create `CreateCrawlJobResponse`, `CrawlJobDetailsResponse`, and `PaginatedListResponse`.
 - [x] **Task 3.2: Jobs Controller Implementation**
-  - [x] `POST /api/jobs`: Persist new job and enqueue `CrawlJobRequestedMessage`.
+  - [x] `POST /api/jobs`: Persist new job with its root page and enqueue the root `CrawlPageMessage` (see 8.3).
   - [x] `GET /api/jobs/{id}`: Retrieve job status and assembled page tree.
   - [x] `GET /api/jobs`: Paginated history list sorted by `CreatedAt DESC`.
   - [x] `POST /api/jobs/{id}/cancel`: Mark pending or running job as `Canceled`.
@@ -64,17 +64,17 @@
 
 ## 4. Crawl Worker (`Alteva.CrawlWorker`)
 
-- [x] **Task 4.1: Crawler Engine Core**
+- [x] **Task 4.1: Crawler Engine Core** — superseded by the recursive page crawl (section 8)
   - [x] BFS queue traversal with depth limiting.
   - [x] Visited URL deduplication set.
   - [x] Max pages safety cutoff (default 200).
   - [x] Error handling for HTTP status codes and timeouts.
 - [x] **Task 4.2: RabbitMQ Background Consumer**
-  - [x] Consume `CrawlJobRequestedMessage` from queue with prefetch limit (`BasicQos(0, 1, false)`).
+  - [x] Consume crawl messages from queue with prefetch limit (`BasicQos(0, 1, false)`) — now `CrawlPageMessage` (see 8.3).
   - [x] Update Job status to `Running` with `StartedAt` timestamp.
   - [x] Save discovered pages and edges to database in batches or transaction.
   - [x] Update Job status to `Completed` or `Failed` with `CompletedAt`.
-  - [x] Implement retry policy for transient DB/network errors; forward to DLQ upon exhaustion.
+  - [x] Implement retry policy for transient DB/network errors — revised: HTTP retries in-process, infrastructure failures requeued, DLQ only for malformed messages (see 8.5).
 
 ---
 
@@ -124,3 +124,28 @@
   - [x] Verify SQL Server, RabbitMQ, API, and Worker spin up and communicate cleanly.
 - [x] **Task 7.4: Submission Documentation**
   - [x] Document run instructions, architectural decisions, idempotency strategy, and trade-offs.
+
+---
+
+## 8. Recursive Page Crawl Refactor (`feat/recursive-page-crawl`)
+
+- [x] **Task 8.1: Contract & schema (Phase 1)**
+  - [x] `CrawlPageMessage { jobId, url, depth, maxDepth, rootUrl }`; `PageStatus` (`Queued`, `Done`, `Failed`, `Skipped`).
+  - [x] `Page.Depth`, `Status`, `FailureReason`, nullable `DomainLinkRatio`, `UrlHash`; migration `AddPageCrawlState` with backfill.
+- [x] **Task 8.2: Sequential, polite crawling**
+  - [x] Remove semaphores/parallelism; worker prefetch 1; random 3–5 s delay before every download.
+- [x] **Task 8.3: State store, confirms, recursion (Phases 2–3)**
+  - [x] `CrawlStateStore`: create job, page gate, transactional commit (guard, edges, claims, completion), queued children, cancel/fail.
+  - [x] Publisher confirms; shared `RabbitMQTopology`.
+  - [x] `PageCrawlHandler` / `PageCrawler`; cancellation aborts the in-flight page (1 s job-status poll).
+- [x] **Task 8.4: API & UI (Phase 4)**
+  - [x] Atomic cancel; 503 and `Failed` job when the root cannot be published.
+  - [x] `pagesDiscovered` / `pagesProcessed` and a progress bar; breadth-first tree with page status; string enums.
+- [x] **Task 8.5: Reliability & observability**
+  - [x] HTTP retries (network, timeout, 408, 429, 5xx; `Retry-After`), no retry for other 4xx.
+  - [x] Infrastructure failures requeue with a 10 s delay (Phase 5); DLQ only for malformed messages; dropped `Job.RetryCount`.
+  - [x] Worker `/health` (RabbitMQ consumer + database, 3 s bound); quieter EF/HttpClient logs.
+- [x] **Task 8.6: Hardening & delivery (Phase 6)**
+  - [x] Resolve links against the fetched URL; decode href entities; preserve percent-encoding.
+  - [x] README per requirements; architecture notes, milestones and tasks refreshed.
+  - [x] End-to-end verification on Docker Compose with a fresh database.
