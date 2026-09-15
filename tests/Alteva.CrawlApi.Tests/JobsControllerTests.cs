@@ -24,8 +24,15 @@ public class FakeMessagePublisher : IMessagePublisher
 {
     public List<object> PublishedMessages { get; } = [];
 
+    public bool ShouldFail { get; set; }
+
     public Task PublishAsync<T>(T message, string? routingKey = null, CancellationToken cancellationToken = default)
     {
+        if (ShouldFail)
+        {
+            throw new InvalidOperationException("Broker unavailable");
+        }
+
         if (message != null)
         {
             PublishedMessages.Add(message);
@@ -57,10 +64,11 @@ public class JobsControllerTests : IDisposable
 
         _publisher = new FakeMessagePublisher();
         _urlNormalizer = new UrlNormalizer();
-        _treeBuilder = new JobTreeBuilder(_urlNormalizer);
+        _treeBuilder = new JobTreeBuilder();
 
         _controller = new JobsController(
             _dbContext,
+            new CrawlStateStore(_dbContext),
             _publisher,
             _urlNormalizer,
             _treeBuilder,
@@ -99,13 +107,37 @@ public class JobsControllerTests : IDisposable
         savedJob.MaxDepth.Should().Be(3);
         savedJob.Status.Should().Be(JobStatus.Pending);
 
-        // Verify message published
+        var rootPage = await _dbContext.Pages.SingleAsync(p => p.JobId == response.JobId);
+        rootPage.Url.Should().Be("https://example.com/");
+        rootPage.Depth.Should().Be(0);
+        rootPage.Status.Should().Be(PageStatus.Queued);
+
+        // Verify the root page message was published
         _publisher.PublishedMessages.Should().HaveCount(1);
-        var message = _publisher.PublishedMessages[0] as CrawlJobRequestedMessage;
+        var message = _publisher.PublishedMessages[0] as CrawlPageMessage;
         message.Should().NotBeNull();
         message!.JobId.Should().Be(response.JobId);
-        message.InputUrl.Should().Be("https://example.com/");
+        message.Url.Should().Be("https://example.com/");
+        message.RootUrl.Should().Be("https://example.com/");
+        message.Depth.Should().Be(0);
         message.MaxDepth.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task CreateJob_WhenRootCannotBePublished_Returns503AndFailsJob()
+    {
+        _publisher.ShouldFail = true;
+
+        var result = await _controller.CreateJob(new CreateCrawlJobRequest { Url = "https://example.com" }, CancellationToken.None);
+
+        var objectResult = result as ObjectResult;
+        objectResult.Should().NotBeNull();
+        objectResult!.StatusCode.Should().Be(503);
+
+        var job = await _dbContext.Jobs.AsNoTracking().SingleAsync();
+        job.Status.Should().Be(JobStatus.Failed);
+        job.FailureReason.Should().Be(JobsController.EnqueueFailedReason);
+        (await _dbContext.Pages.AsNoTracking().SingleAsync()).Status.Should().Be(PageStatus.Skipped);
     }
 
     [Fact]
@@ -140,6 +172,10 @@ public class JobsControllerTests : IDisposable
             StartedAt = DateTime.UtcNow.AddMinutes(-4)
         };
         _dbContext.Jobs.Add(job);
+        _dbContext.Pages.AddRange(
+            new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/", Status = PageStatus.Done, DomainLinkRatio = 1.0 },
+            new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/a", Status = PageStatus.Failed, Depth = 1 },
+            new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/b", Status = PageStatus.Queued, Depth = 1 });
         await _dbContext.SaveChangesAsync();
 
         var result = await _controller.GetJobById(jobId, CancellationToken.None);
@@ -147,6 +183,9 @@ public class JobsControllerTests : IDisposable
         var okResult = result as OkObjectResult;
         okResult.Should().NotBeNull();
         okResult!.StatusCode.Should().Be(200);
+        var progress = (CrawlJobDetailsResponse)okResult.Value!;
+        progress.PagesDiscovered.Should().Be(3);
+        progress.PagesProcessed.Should().Be(2);
 
         var details = okResult.Value as CrawlJobDetailsResponse;
         details.Should().NotBeNull();
@@ -171,8 +210,8 @@ public class JobsControllerTests : IDisposable
         _dbContext.Jobs.Add(job);
 
         _dbContext.Pages.AddRange(
-            new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/", DomainLinkRatio = 1.0 },
-            new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/about", DomainLinkRatio = 0.5 }
+            new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/", Status = PageStatus.Done, DomainLinkRatio = 1.0 },
+            new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/about", Status = PageStatus.Done, DomainLinkRatio = 0.5, Depth = 1 }
         );
 
         _dbContext.Edges.Add(
@@ -245,14 +284,18 @@ public class JobsControllerTests : IDisposable
         _dbContext.Jobs.Add(job);
         await _dbContext.SaveChangesAsync();
 
+        _dbContext.Pages.Add(new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/", Status = PageStatus.Queued });
+        await _dbContext.SaveChangesAsync();
+
         var result = await _controller.CancelJob(jobId, CancellationToken.None);
 
         var okResult = result as OkObjectResult;
         okResult.Should().NotBeNull();
 
-        var updated = await _dbContext.Jobs.FindAsync(jobId);
-        updated!.Status.Should().Be(JobStatus.Canceled);
+        var updated = await _dbContext.Jobs.AsNoTracking().SingleAsync(j => j.Id == jobId);
+        updated.Status.Should().Be(JobStatus.Canceled);
         updated.CompletedAt.Should().NotBeNull();
+        (await _dbContext.Pages.AsNoTracking().SingleAsync(p => p.JobId == jobId)).Status.Should().Be(PageStatus.Skipped);
     }
 
     [Fact]

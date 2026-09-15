@@ -12,26 +12,27 @@ namespace Alteva.Infrastructure.Tests;
 public class MessageSerializationTests
 {
     [Fact]
-    public void CrawlJobRequestedMessage_ShouldSerializeAndDeserializeAccurately()
+    public void CrawlPageMessage_ShouldSerializeAndDeserializeAccurately()
     {
         var jobId = Guid.NewGuid();
-        var now = DateTime.UtcNow;
-
-        var original = new CrawlJobRequestedMessage
+        var original = new CrawlPageMessage
         {
             JobId = jobId,
-            InputUrl = "https://example.com/test",
+            Url = "https://example.com/docs/intro",
+            Depth = 1,
             MaxDepth = 3,
-            SubmittedAt = now
+            RootUrl = "https://example.com/"
         };
 
         var bytes = JsonSerializer.SerializeToUtf8Bytes(original);
-        var deserialized = JsonSerializer.Deserialize<CrawlJobRequestedMessage>(bytes);
+        var deserialized = JsonSerializer.Deserialize<CrawlPageMessage>(bytes, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
         deserialized.Should().NotBeNull();
         deserialized!.JobId.Should().Be(jobId);
-        deserialized.InputUrl.Should().Be("https://example.com/test");
+        deserialized.Url.Should().Be("https://example.com/docs/intro");
+        deserialized.Depth.Should().Be(1);
         deserialized.MaxDepth.Should().Be(3);
+        deserialized.RootUrl.Should().Be("https://example.com/");
     }
 
     [Fact]

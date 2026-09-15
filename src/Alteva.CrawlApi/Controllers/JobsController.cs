@@ -21,16 +21,20 @@ namespace Alteva.CrawlApi.Controllers;
 [Produces("application/json")]
 public class JobsController(
     AppDbContext dbContext,
+    ICrawlStateStore crawlStateStore,
     IMessagePublisher messagePublisher,
     IUrlNormalizer urlNormalizer,
     IJobTreeBuilder treeBuilder,
     ILogger<JobsController> logger) : ControllerBase
 {
     private readonly AppDbContext _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
+    private readonly ICrawlStateStore _crawlStateStore = crawlStateStore ?? throw new ArgumentNullException(nameof(crawlStateStore));
     private readonly IMessagePublisher _messagePublisher = messagePublisher ?? throw new ArgumentNullException(nameof(messagePublisher));
     private readonly IUrlNormalizer _urlNormalizer = urlNormalizer ?? throw new ArgumentNullException(nameof(urlNormalizer));
     private readonly IJobTreeBuilder _treeBuilder = treeBuilder ?? throw new ArgumentNullException(nameof(treeBuilder));
     private readonly ILogger<JobsController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+    public const string EnqueueFailedReason = "The crawl could not be queued (message broker unavailable).";
 
     /// <summary>
     /// Submits a new crawl job.
@@ -41,6 +45,7 @@ public class JobsController(
     [HttpPost]
     [ProducesResponseType(typeof(CreateCrawlJobResponse), StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> CreateJob(
         [FromBody] CreateCrawlJobRequest request,
         CancellationToken cancellationToken)
@@ -61,35 +66,34 @@ public class JobsController(
             });
         }
 
-        var job = new Job
-        {
-            Id = Guid.NewGuid(),
-            InputUrl = normalizedUrl,
-            MaxDepth = request.MaxDepth ?? 2,
-            Status = JobStatus.Pending,
-            CreatedAt = DateTime.UtcNow
-        };
-
-        _dbContext.Jobs.Add(job);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        var job = await _crawlStateStore.CreateJobAsync(normalizedUrl, request.MaxDepth ?? 2, cancellationToken);
 
         _logger.LogInformation("Job {JobId} registered with status {Status} for URL {Url}", job.Id, job.Status, job.InputUrl);
 
-        // Publish event to message broker for background processing
+        // Publish the root page; the worker recursively publishes its children
         try
         {
-            await _messagePublisher.PublishAsync(new CrawlJobRequestedMessage
+            await _messagePublisher.PublishAsync(new CrawlPageMessage
             {
                 JobId = job.Id,
-                InputUrl = job.InputUrl,
+                Url = job.InputUrl,
+                Depth = 0,
                 MaxDepth = job.MaxDepth,
-                SubmittedAt = job.CreatedAt
+                RootUrl = job.InputUrl
             }, cancellationToken: cancellationToken);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to publish job event for Job {JobId}. Job remains in Pending status.", job.Id);
-            // We still return 202 Accepted because the job record exists in the DB and can be picked up by a recovery worker
+            // Nothing will ever process the job without its root message, so end it rather than leave it Pending.
+            _logger.LogError(ex, "Failed to publish the root page for Job {JobId}. Marking the job Failed.", job.Id);
+            await _crawlStateStore.FailJobAsync(job.Id, EnqueueFailedReason, CancellationToken.None);
+
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Title = "Crawl Queue Unavailable",
+                Detail = $"Job '{job.Id}' could not be queued and was marked Failed. Please try again later.",
+                Status = StatusCodes.Status503ServiceUnavailable
+            });
         }
 
         return AcceptedAtAction(
@@ -124,6 +128,12 @@ public class JobsController(
             });
         }
 
+        var pageCounts = await _dbContext.Pages
+            .Where(p => p.JobId == id)
+            .GroupBy(p => p.Status)
+            .Select(g => new { Status = g.Key, Count = g.Count() })
+            .ToListAsync(cancellationToken);
+
         JobTreeNode? tree = null;
         if (job.Status == JobStatus.Completed)
         {
@@ -132,9 +142,11 @@ public class JobsController(
                 .Where(p => p.JobId == id)
                 .ToListAsync(cancellationToken);
 
+            // Insertion order = discovery order, which the tree uses to pick each page's parent
             var edges = await _dbContext.Edges
                 .AsNoTracking()
                 .Where(e => e.JobId == id)
+                .OrderBy(e => e.Id)
                 .ToListAsync(cancellationToken);
 
             tree = _treeBuilder.BuildTree(job.InputUrl, pages, edges);
@@ -150,6 +162,8 @@ public class JobsController(
             StartedAt = job.StartedAt,
             CompletedAt = job.CompletedAt,
             FailureReason = job.FailureReason,
+            PagesDiscovered = pageCounts.Sum(c => c.Count),
+            PagesProcessed = pageCounts.Where(c => c.Status != PageStatus.Queued).Sum(c => c.Count),
             Tree = tree
         };
 
@@ -215,8 +229,11 @@ public class JobsController(
         [FromRoute] Guid id,
         CancellationToken cancellationToken)
     {
-        var job = await _dbContext.Jobs.FindAsync([id], cancellationToken);
-        if (job == null)
+        var status = await _dbContext.Jobs
+            .Where(j => j.Id == id)
+            .Select(j => (JobStatus?)j.Status)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (status == null)
         {
             return NotFound(new ProblemDetails
             {
@@ -226,19 +243,16 @@ public class JobsController(
             });
         }
 
-        if (job.Status == JobStatus.Completed || job.Status == JobStatus.Failed || job.Status == JobStatus.Canceled)
+        // Atomic: only a Pending/Running job is cancelled, and its Queued pages are skipped with it
+        if (!await _crawlStateStore.CancelJobAsync(id, cancellationToken))
         {
             return BadRequest(new ProblemDetails
             {
                 Title = "Invalid Operation",
-                Detail = $"Job with ID '{id}' is already in terminal state '{job.Status}' and cannot be canceled.",
+                Detail = $"Job with ID '{id}' is already in terminal state '{status}' and cannot be canceled.",
                 Status = StatusCodes.Status400BadRequest
             });
         }
-
-        job.Status = JobStatus.Canceled;
-        job.CompletedAt = DateTime.UtcNow;
-        await _dbContext.SaveChangesAsync(cancellationToken);
 
         _logger.LogInformation("Job {JobId} was canceled by user.", id);
 

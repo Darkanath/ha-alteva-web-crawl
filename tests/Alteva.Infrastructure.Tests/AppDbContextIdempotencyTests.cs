@@ -98,46 +98,64 @@ public class AppDbContextIdempotencyTests : IDisposable
         var act = async () => await context.SaveChangesAsync();
         var ex = await act.Should().ThrowAsync<DbUpdateException>();
         ex.WithInnerException<SqliteException>()
-            .WithMessage("*UNIQUE constraint failed: Pages.JobId, Pages.Url*");
+            .WithMessage("*UNIQUE constraint failed: Pages.JobId, Pages.UrlHash*");
     }
 
     [Fact]
-    public async Task Edges_UniqueIndex_PreventsDuplicateEdgePerJob_EnsuringIdempotency()
+    public async Task Pages_UniqueIndex_TreatsUrlsDifferingOnlyByCaseAsDistinct_AndRoundTripsHash()
     {
         var jobId = Guid.NewGuid();
-        using var context = new AppDbContext(_options);
-        
-        var job = new Job
+        using (var context = new AppDbContext(_options))
         {
-            Id = jobId,
-            InputUrl = "https://example.com",
-            Status = JobStatus.Running
-        };
-        context.Jobs.Add(job);
-        await context.SaveChangesAsync();
+            context.Jobs.Add(new Job { Id = jobId, InputUrl = "https://example.com", Status = JobStatus.Running });
+            context.Pages.Add(new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/About" });
+            context.Pages.Add(new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/about" });
+            await context.SaveChangesAsync();
+        }
 
-        var edge1 = new Edge
+        using (var context = new AppDbContext(_options))
         {
-            JobId = jobId,
-            ParentUrl = "https://example.com/",
-            ChildUrl = "https://example.com/about"
-        };
-        context.Edges.Add(edge1);
-        await context.SaveChangesAsync();
+            var expectedHash = Alteva.Domain.Services.UrlHasher.Hash("https://example.com/About");
+            var page = await context.Pages.SingleAsync(p => p.JobId == jobId && p.UrlHash == expectedHash);
 
-        // Duplicate edge for same job
-        var edge2 = new Edge
+            page.Url.Should().Be("https://example.com/About");
+            (await context.Pages.CountAsync(p => p.JobId == jobId)).Should().Be(2);
+        }
+    }
+
+    [Fact]
+    public async Task Page_ClaimedRow_DefaultsToQueuedWithNoRatio_AndPersistsCrawlState()
+    {
+        var jobId = Guid.NewGuid();
+        var pageId = Guid.NewGuid();
+        using (var context = new AppDbContext(_options))
         {
-            JobId = jobId,
-            ParentUrl = "https://example.com/",
-            ChildUrl = "https://example.com/about"
-        };
-        context.Edges.Add(edge2);
+            context.Jobs.Add(new Job { Id = jobId, InputUrl = "https://example.com", Status = JobStatus.Running });
+            context.Pages.Add(new Page { Id = pageId, JobId = jobId, Url = "https://example.com/", Depth = 1 });
+            await context.SaveChangesAsync();
+        }
 
-        var act = async () => await context.SaveChangesAsync();
-        var ex = await act.Should().ThrowAsync<DbUpdateException>();
-        ex.WithInnerException<SqliteException>()
-            .WithMessage("*UNIQUE constraint failed: Edges.JobId, Edges.ParentUrl, Edges.ChildUrl*");
+        using (var context = new AppDbContext(_options))
+        {
+            var claimed = await context.Pages.SingleAsync(p => p.Id == pageId);
+            claimed.Status.Should().Be(PageStatus.Queued);
+            claimed.DomainLinkRatio.Should().BeNull();
+            claimed.Depth.Should().Be(1);
+
+            claimed.Status = PageStatus.Failed;
+            claimed.FailureReason = "HTTP 503";
+            await context.SaveChangesAsync();
+        }
+
+        using (var context = new AppDbContext(_options))
+        {
+            var page = await context.Pages.SingleAsync(p => p.Id == pageId);
+            page.Status.Should().Be(PageStatus.Failed);
+            page.FailureReason.Should().Be("HTTP 503");
+
+            // The completion check filters on the stored status value
+            (await context.Pages.AnyAsync(p => p.JobId == jobId && p.Status == PageStatus.Queued)).Should().BeFalse();
+        }
     }
 
     [Fact]

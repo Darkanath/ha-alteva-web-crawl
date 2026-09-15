@@ -17,5 +17,13 @@ public class CrawlJobDetailsResponse
     public DateTime? StartedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
     public string? FailureReason { get; set; }
+
+    /// <summary>Pages claimed so far (root included).</summary>
+    public int PagesDiscovered { get; set; }
+
+    /// <summary>Pages no longer Queued (Done, Failed or Skipped).</summary>
+    public int PagesProcessed { get; set; }
+
+    /// <summary>Only set once the job is Completed.</summary>
     public JobTreeNode? Tree { get; set; }
 }

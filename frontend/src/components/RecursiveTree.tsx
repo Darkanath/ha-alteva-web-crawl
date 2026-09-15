@@ -33,9 +33,11 @@ export function RecursiveTree({ node }: RecursiveTreeProps) {
           {node.url}
         </span>
         
-        <span className="ratio-pill">
-          {formatRatio(node.domainLinkRatio)}
-        </span>
+        {node.status === 'Done' ? (
+          <span className="ratio-pill">{formatRatio(node.domainLinkRatio)}</span>
+        ) : (
+          <span className="ratio-pill" title="Not crawled, so no Domain Link Ratio">{node.status}</span>
+        )}
       </div>
       
       {hasChildren && isExpanded && (

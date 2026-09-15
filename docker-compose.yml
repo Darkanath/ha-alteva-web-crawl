@@ -63,6 +63,8 @@ services:
     # is exhausted or the consumer is cancelled unrecoverably (see Worker.cs),
     # relying on the orchestrator to bring it back up with a fresh connection.
     restart: unless-stopped
+    ports:
+      - "${WORKER_HEALTH_PORT:-8081}:8080"   # GET /health (RabbitMQ consumer + database)
     environment:
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
       - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=${SQL_SERVER_DATABASE:-AltevaCrawlDb};User Id=${SQL_SERVER_USER:-sa};Password=${SQL_SERVER_PASSWORD};TrustServerCertificate=True;
@@ -71,9 +73,8 @@ services:
       - RabbitMQ__Username=${RABBITMQ_DEFAULT_USER:-guest}
       - RabbitMQ__Password=${RABBITMQ_DEFAULT_PASS:-guest}
       - MAX_PAGES_SAFETY_LIMIT=${MAX_PAGES_SAFETY_LIMIT:-200}
-      - WORKER_MAX_CONCURRENT_JOBS=${WORKER_MAX_CONCURRENT_JOBS:-1}
-      - CRAWLER_MAX_CONCURRENT_PAGES=${CRAWLER_MAX_CONCURRENT_PAGES:-5}
-      - CRAWLER_MAX_CONCURRENT_PER_DOMAIN=${CRAWLER_MAX_CONCURRENT_PER_DOMAIN:-2}
+      - CRAWLER_DELAY_MIN_SECONDS=${CRAWLER_DELAY_MIN_SECONDS:-3}
+      - CRAWLER_DELAY_MAX_SECONDS=${CRAWLER_DELAY_MAX_SECONDS:-5}
     depends_on:
       rabbitmq:
         condition: service_healthy

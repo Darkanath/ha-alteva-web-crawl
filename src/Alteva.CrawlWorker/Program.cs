@@ -1,17 +1,16 @@
 using Alteva.CrawlWorker;
+using Alteva.CrawlWorker.Health;
 using Alteva.CrawlWorker.Services;
 using Alteva.Domain.Services;
 using Alteva.Infrastructure.Data;
 using Alteva.Infrastructure.Messaging;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 
-var builder = Host.CreateApplicationBuilder(args);
+// A minimal web host, only so the worker can serve /health; all crawling happens in the Worker hosted service.
+var builder = WebApplication.CreateBuilder(args);
 
 // ==========================================
-// Database Persistence
+// Database Persistence & Crawl State
 // ==========================================
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
@@ -19,11 +18,13 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         ?? throw new InvalidOperationException("Connection string 'DefaultConnection' was not found in configuration or environment.");
     options.UseSqlServer(connectionString);
 });
+builder.Services.AddScoped<ICrawlStateStore, CrawlStateStore>();
 
 // ==========================================
-// Messaging & Broker Options
+// Messaging (consumer in Worker, publisher for claimed children)
 // ==========================================
 builder.Services.Configure<RabbitMQOptions>(builder.Configuration.GetSection(RabbitMQOptions.SectionName));
+builder.Services.AddSingleton<IMessagePublisher, RabbitMQMessagePublisher>();
 
 // ==========================================
 // Domain Services
@@ -33,23 +34,27 @@ builder.Services.AddSingleton<IHtmlLinkExtractor, HtmlLinkExtractor>();
 builder.Services.AddSingleton<IDomainLinkRatioCalculator, DomainLinkRatioCalculator>();
 
 // ==========================================
-// Crawler Engine & HTTP Client
+// Page Crawling
 // ==========================================
-builder.Services.AddHttpClient<ICrawlerEngine, CrawlerEngine>(client =>
+builder.Services.AddHttpClient<PageCrawler>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(15);
     client.DefaultRequestHeaders.UserAgent.ParseAdd("AltevaWebCrawler/1.0 (+https://github.com/Darkanath/ha-alteva-web-crawl)");
 });
+builder.Services.AddScoped<PageCrawlHandler>();
+
+// Singleton so the health check can observe the consumer
+builder.Services.AddSingleton<Worker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Worker>());
 
 // ==========================================
-// Retry Tracking (per-Job retry count, since classic queues don't set x-delivery-count)
+// Health
 // ==========================================
-builder.Services.AddScoped<IRetryTracker, RetryTracker>();
+// Short timeout: an unreachable database would otherwise hold /health for the full SQL connect timeout
+builder.Services.AddHealthChecks()
+    .AddCheck<RabbitMqConsumerHealthCheck>("rabbitmq")
+    .AddCheck<DatabaseHealthCheck>("database", timeout: TimeSpan.FromSeconds(3));
 
-// ==========================================
-// Background Worker Hosted Service
-// ==========================================
-builder.Services.AddHostedService<Worker>();
-
-var host = builder.Build();
-host.Run();
+var app = builder.Build();
+app.MapHealthChecks("/health");
+app.Run();

@@ -8,87 +8,59 @@ namespace Alteva.Domain.Services;
 
 /// <summary>
 /// Default implementation of <see cref="IJobTreeBuilder"/>.
-/// Assembles a cycle-safe tree hierarchy from flat Page entities and directed Edge entities.
+/// Builds a breadth-first spanning tree: every page of the job appears exactly once, under the
+/// first page (in breadth-first order) that links to it — the same order in which the crawl
+/// claimed pages. Links to URLs that are not pages of the job (external, beyond max depth or
+/// the page limit) are not nodes.
 /// </summary>
-public class JobTreeBuilder(IUrlNormalizer urlNormalizer) : IJobTreeBuilder
+public class JobTreeBuilder : IJobTreeBuilder
 {
-    private readonly IUrlNormalizer _urlNormalizer = urlNormalizer ?? throw new ArgumentNullException(nameof(urlNormalizer));
-
-    public JobTreeNode? BuildTree(string rootUrl, IEnumerable<Page> pages, IEnumerable<Edge> edges, int maxDepth = 10)
+    public JobTreeNode? BuildTree(string rootUrl, IEnumerable<Page> pages, IEnumerable<Edge> edges)
     {
-        if (string.IsNullOrWhiteSpace(rootUrl) || pages == null || edges == null)
+        ArgumentNullException.ThrowIfNull(pages);
+        ArgumentNullException.ThrowIfNull(edges);
+
+        var pagesByUrl = pages.ToDictionary(p => p.Url, StringComparer.Ordinal);
+        if (!pagesByUrl.TryGetValue(rootUrl, out var rootPage))
         {
             return null;
         }
 
-        var normalizedRoot = _urlNormalizer.Normalize(rootUrl) ?? rootUrl;
+        var linksByParent = edges
+            .GroupBy(e => e.ParentUrl, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Select(e => e.ChildUrl).ToList(), StringComparer.Ordinal);
 
-        // Map pages by normalized URL for O(1) ratio lookups
-        var pageMap = pages
-            .GroupBy(p => p.Url, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var root = CreateNode(rootPage, depth: 0);
+        var placed = new HashSet<string>(StringComparer.Ordinal) { root.Url };
+        var queue = new Queue<JobTreeNode>([root]);
 
-        // Group edges by parent URL for O(1) children lookups
-        var edgeGroup = edges
-            .GroupBy(e => e.ParentUrl, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(e => e.ChildUrl).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
-                StringComparer.OrdinalIgnoreCase);
-
-        var rootPage = pageMap.TryGetValue(normalizedRoot, out var p) ? p : null;
-        var rootNode = new JobTreeNode
+        while (queue.Count > 0)
         {
-            Url = normalizedRoot,
-            DomainLinkRatio = rootPage?.DomainLinkRatio ?? 0.0,
-            Depth = 0
-        };
-
-        var currentPath = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalizedRoot };
-        PopulateChildren(rootNode, edgeGroup, pageMap, currentPath, 0, maxDepth);
-
-        return rootNode;
-    }
-
-    private void PopulateChildren(
-        JobTreeNode parentNode,
-        Dictionary<string, List<string>> edgesByParent,
-        Dictionary<string, Page> pagesByUrl,
-        HashSet<string> currentPath,
-        int currentDepth,
-        int maxDepth)
-    {
-        if (currentDepth >= maxDepth)
-        {
-            return;
-        }
-
-        if (!edgesByParent.TryGetValue(parentNode.Url, out var childUrls))
-        {
-            return;
-        }
-
-        foreach (var childUrl in childUrls)
-        {
-            // Cycle prevention along this branch
-            if (currentPath.Contains(childUrl))
+            var node = queue.Dequeue();
+            if (!linksByParent.TryGetValue(node.Url, out var childUrls))
             {
                 continue;
             }
 
-            var page = pagesByUrl.TryGetValue(childUrl, out var p) ? p : null;
-            var childNode = new JobTreeNode
+            foreach (var childUrl in childUrls)
             {
-                Url = childUrl,
-                DomainLinkRatio = page?.DomainLinkRatio ?? 0.0,
-                Depth = currentDepth + 1
-            };
-
-            parentNode.Children.Add(childNode);
-
-            currentPath.Add(childUrl);
-            PopulateChildren(childNode, edgesByParent, pagesByUrl, currentPath, currentDepth + 1, maxDepth);
-            currentPath.Remove(childUrl);
+                if (pagesByUrl.TryGetValue(childUrl, out var childPage) && placed.Add(childUrl))
+                {
+                    var child = CreateNode(childPage, node.Depth + 1);
+                    node.Children.Add(child);
+                    queue.Enqueue(child);
+                }
+            }
         }
+
+        return root;
     }
+
+    private static JobTreeNode CreateNode(Page page, int depth) => new()
+    {
+        Url = page.Url,
+        DomainLinkRatio = page.Status == PageStatus.Done ? page.DomainLinkRatio : null,
+        Status = page.Status,
+        Depth = depth
+    };
 }
