@@ -167,17 +167,25 @@ public class CrawlStateStore(AppDbContext dbContext) : ICrawlStateStore
             .ToList();
     }
 
-    public async Task<bool> CancelJobAsync(Guid jobId, CancellationToken cancellationToken)
+    public Task<bool> CancelJobAsync(Guid jobId, CancellationToken cancellationToken) =>
+        EndJobAsync(jobId, JobStatus.Canceled, jobReason: null, pageReason: CanceledReason, cancellationToken);
+
+    public Task<bool> FailJobAsync(Guid jobId, string reason, CancellationToken cancellationToken) =>
+        EndJobAsync(jobId, JobStatus.Failed, jobReason: reason, pageReason: reason, cancellationToken);
+
+    // Moves an active job to a terminal status and skips its Queued pages, so their messages are discarded.
+    private async Task<bool> EndJobAsync(Guid jobId, JobStatus status, string? jobReason, string pageReason, CancellationToken cancellationToken)
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         var now = DateTime.UtcNow;
 
-        var canceled = await dbContext.Jobs
+        var ended = await dbContext.Jobs
             .Where(j => j.Id == jobId && (j.Status == JobStatus.Pending || j.Status == JobStatus.Running))
             .ExecuteUpdateAsync(s => s
-                .SetProperty(j => j.Status, JobStatus.Canceled)
+                .SetProperty(j => j.Status, status)
+                .SetProperty(j => j.FailureReason, jobReason)
                 .SetProperty(j => j.CompletedAt, now), cancellationToken);
-        if (canceled == 0)
+        if (ended == 0)
         {
             return false;
         }
@@ -186,7 +194,7 @@ public class CrawlStateStore(AppDbContext dbContext) : ICrawlStateStore
             .Where(p => p.JobId == jobId && p.Status == PageStatus.Queued)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(p => p.Status, PageStatus.Skipped)
-                .SetProperty(p => p.FailureReason, CanceledReason), cancellationToken);
+                .SetProperty(p => p.FailureReason, pageReason), cancellationToken);
 
         await transaction.CommitAsync(cancellationToken);
         return true;

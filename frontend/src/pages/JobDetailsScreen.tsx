@@ -138,6 +138,18 @@ export function JobDetailsScreen() {
           )}
         </div>
 
+        <div style={{ marginTop: '2rem' }}>
+          <div className="form-label">Progress</div>
+          <div>
+            {job.pagesProcessed} of {job.pagesDiscovered} discovered pages processed
+          </div>
+          <progress
+            value={job.pagesProcessed}
+            max={Math.max(job.pagesDiscovered, 1)}
+            style={{ width: '100%', marginTop: '0.5rem' }}
+          />
+        </div>
+
         {job.failureReason && (
           <div className="alert alert-error" style={{ marginTop: '2rem', marginBottom: 0 }}>
             <strong>Failure Reason:</strong> {job.failureReason}

@@ -7,9 +7,14 @@ export interface CreateCrawlJobResponse {
   jobId: string;
 }
 
+export type PageStatus = 'Queued' | 'Done' | 'Failed' | 'Skipped';
+
 export interface JobTreeNode {
   url: string;
-  domainLinkRatio: number;
+  /** Null unless the page status is Done. */
+  domainLinkRatio: number | null;
+  status: PageStatus;
+  depth: number;
   children: JobTreeNode[];
 }
 
@@ -22,6 +27,10 @@ export interface CrawlJobDetailsResponse {
   startedAt?: string;
   completedAt?: string;
   failureReason?: string;
+  /** Pages claimed so far (root included). */
+  pagesDiscovered: number;
+  /** Pages no longer queued (Done, Failed or Skipped). */
+  pagesProcessed: number;
   tree?: JobTreeNode;
 }
 

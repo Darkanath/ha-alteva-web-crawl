@@ -160,6 +160,21 @@ public class CrawlStateStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task FailJob_FailsActiveJobWithReason_AndSkipsQueuedPages()
+    {
+        var job = await WithStore(s => s.CreateJobAsync(Root, 2, CancellationToken.None));
+
+        (await WithStore(s => s.FailJobAsync(job.Id, "queue down", CancellationToken.None))).Should().BeTrue();
+
+        var savedJob = await WithDb(db => db.Jobs.SingleAsync(j => j.Id == job.Id));
+        savedJob.Status.Should().Be(JobStatus.Failed);
+        savedJob.FailureReason.Should().Be("queue down");
+        savedJob.CompletedAt.Should().NotBeNull();
+        (await WithDb(db => db.Pages.SingleAsync(p => p.JobId == job.Id))).Status.Should().Be(PageStatus.Skipped);
+        (await WithStore(s => s.FailJobAsync(job.Id, "again", CancellationToken.None))).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task GetQueuedChildren_ReturnsOnlyStillQueuedChildrenOfParent()
     {
         var job = await WithStore(s => s.CreateJobAsync(Root, 3, CancellationToken.None));

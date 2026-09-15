@@ -10,12 +10,11 @@ namespace Alteva.Domain.Services;
 public interface IJobTreeBuilder
 {
     /// <summary>
-    /// Builds a hierarchical tree rooted at the initial job URL.
+    /// Builds a tree rooted at the job's root page in which every page appears once.
     /// </summary>
-    /// <param name="rootUrl">The starting URL of the job.</param>
-    /// <param name="pages">All pages discovered in the job.</param>
-    /// <param name="edges">All directed parent-to-child links in the job.</param>
-    /// <param name="maxDepth">Maximum depth to prevent infinite loops.</param>
-    /// <returns>The root JobTreeNode with nested children, or null if root page not found.</returns>
-    JobTreeNode? BuildTree(string rootUrl, IEnumerable<Page> pages, IEnumerable<Edge> edges, int maxDepth = 10);
+    /// <param name="rootUrl">The job's normalized root URL (equal to the root page's URL).</param>
+    /// <param name="pages">All pages of the job.</param>
+    /// <param name="edges">All directed parent-to-child links of the job, in discovery order.</param>
+    /// <returns>The root node with nested children, or null if the root page is not found.</returns>
+    JobTreeNode? BuildTree(string rootUrl, IEnumerable<Page> pages, IEnumerable<Edge> edges);
 }

@@ -175,6 +175,13 @@ RabbitMQ cannot delete selected messages from a queue, so cancellation guarantee
 - The publisher has no automatic recovery: a closed channel is reopened on the next publish, so no confirm state is lost across reconnects. The worker's consumer connection uses automatic recovery.
 - Topology is declared by both publisher and worker through `RabbitMQTopology.Declare`, so declarations cannot drift. The publisher declaring it means a root message is routed even before the worker has started.
 
+### 3.9 API: Create, Cancel, Progress & Tree
+- **Create** (`POST /api/jobs`): `CrawlStateStore.CreateJobAsync`, then publish the root message. If the publish fails (no broker confirm), the job is marked `Failed` via `FailJobAsync` ("The crawl could not be queued") and the API returns **503** — a job is never left `Pending` without a message.
+- **Cancel** (`POST /api/jobs/{id}/cancel`): 404 if unknown, otherwise `CancelJobAsync` (atomic, §3.7); 400 if the job is already terminal.
+- **Progress** (`GET /api/jobs/{id}`): `pagesDiscovered` (all pages of the job) and `pagesProcessed` (pages no longer `Queued`), from one grouped count.
+- **Tree** (only once `Completed`): a breadth-first spanning tree. Each page appears **exactly once**, under the first page — in breadth-first order over edges in insertion order — that links to it, which mirrors how the crawl claimed it. Only pages of the job are nodes (external, beyond-depth and over-limit links are omitted). Nodes carry `status`; `domainLinkRatio` is `null` unless the page is `Done`. Building is linear in pages + edges.
+- **JSON:** enums (job and page status) serialize as strings.
+
 ---
 
 ## 4. Data Model
@@ -250,10 +257,10 @@ Unit and integration tests run in isolation — no network, no Docker. Persisten
 
 ```
 tests/
-├── Alteva.Domain.UnitTests/         # 39 tests: UrlNormalizer, UrlHasher, DomainLinkRatio, JobTreeBuilder
-├── Alteva.Infrastructure.Tests/     # 17 tests: CrawlStateStore flow & cancellation, unique indexes, message serialization (SQLite)
+├── Alteva.Domain.UnitTests/         # 42 tests: UrlNormalizer, UrlHasher, DomainLinkRatio, JobTreeBuilder (each page once, dense sites stay linear)
+├── Alteva.Infrastructure.Tests/     # 18 tests: CrawlStateStore flow, cancel & fail, unique indexes, message serialization (SQLite)
 ├── Alteva.CrawlWorker.Tests/        # 14 tests: recursive crawl over a fake FIFO queue, depth/page limits, politeness delay, cancellation (queued, during delay, during download), redelivery, link extraction
-└── Alteva.CrawlApi.Tests/           # 18 tests: request validation, controller behaviour
+└── Alteva.CrawlApi.Tests/           # 19 tests: request validation, create (incl. 503 on publish failure), progress, tree, cancel
 frontend/
 └── src/utils/crawlerUtils.test.ts   # 9 tests: Vitest ratio formatting and status badges
 ```
@@ -268,17 +275,18 @@ frontend/
 | — | Sequential crawling with politeness delay (no semaphores/parallelism) | ✅ Done |
 | 2 | `ICrawlStateStore`, publisher confirms, shared `RabbitMQTopology` | ✅ Done |
 | 3 | `PageCrawlHandler` + `PageCrawler` (gate, cancellable delay/download, commit, publish); `Worker` ack/nack incl. one-retry rule and dead-lettering; API creates job with root page and publishes `CrawlPageMessage`; removed `CrawlerEngine`, `RetryTracker`, `CrawlJobRequestedMessage` | ✅ Done |
-| 4 | API cancel via `CrawlStateStore`, publish-failure handling on create, progress in job details, tree built breadth-first with a global visited set | ⏳ Next |
+| — | Smoke test on `docker compose` (see below) | ✅ Done |
+| 4 | Cancel via `CrawlStateStore`; 503 + `Failed` job on publish failure; progress counts; breadth-first tree (each page once, page status, no ratio for unfinished pages); string enums in JSON; frontend progress bar and page status in tree; quieter EF/HttpClient logs; `DOTNET_ENVIRONMENT` for the worker | ✅ Done |
 | 5 | Drop the unused `Job.RetryCount` column; decide handling when the database/broker is unavailable during failure handling | Pending |
-| 6 | Tests, docs, end-to-end `docker compose` verification | Pending |
+| 6 | Tests, docs, full end-to-end verification | Pending |
 
-**Not yet exercised against real infrastructure:** `Worker` ack/nack paths, publisher confirms, and `CrawlStateStore` on SQL Server are covered only by SQLite/fake-queue tests until the Phase 6 end-to-end run.
-
-**Until Phase 4:** job cancel in the API still sets the job status directly (its `Queued` pages are not marked `Skipped`, but their messages are still discarded at the gate), and a failed root publish leaves the job `Pending`.
+**Verified end to end** (`docker compose`, local fixture site): depth-2 crawl with correct depths, ratios, edges and 3–5 s sequential downloads; root 404 → job `Failed`; cancel during a hanging download aborted in ~1 s with 10 queued messages discarded in ~20 ms and pages `Skipped`; malformed and old-contract messages dead-lettered; worker killed mid-page → message redelivered and crawl completed without duplicates; broker down on create → 503 and job `Failed`; broker restart → API publisher reconnects, worker restarts via its restart policy and resumes.
 
 **Deployment:** the old and new message contracts are incompatible — drain `alteva.crawl.jobs` before deploying Phase 3.
 
 ### Known open issues
+- **No HTTP retry:** the requirements ask for "timeouts and retries for HTTP". Timeouts exist (15 s), but an HTTP error or network failure marks the page `Failed` immediately; only unexpected exceptions are retried (once).
+- **No worker health endpoint:** the requirements ask for health endpoints for API and worker; only the API has `/health`.
 - **Database unavailable while handling a failure:** if a page can be neither committed nor marked `Failed`, its message is dead-lettered and the job stays `Running`. To be decided in Phase 5.
 - **SSRF:** any http(s) URL is crawled, including private/internal addresses.
 - **Link handling:** hrefs are not HTML-entity-decoded, `<base href>` is ignored, redirects are followed off-domain, and `Uri.ToString()` unescapes percent-encoding.

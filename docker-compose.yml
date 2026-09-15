@@ -64,7 +64,8 @@ services:
     # relying on the orchestrator to bring it back up with a fresh connection.
     restart: unless-stopped
     environment:
-      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
+      # The worker uses the generic host, which reads DOTNET_ENVIRONMENT (not ASPNETCORE_ENVIRONMENT)
+      - DOTNET_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
       - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=${SQL_SERVER_DATABASE:-AltevaCrawlDb};User Id=${SQL_SERVER_USER:-sa};Password=${SQL_SERVER_PASSWORD};TrustServerCertificate=True;
       - RabbitMQ__Host=rabbitmq
       - RabbitMQ__Port=5672

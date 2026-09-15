@@ -69,4 +69,7 @@ public interface ICrawlStateStore
 
     /// <summary>Cancels a Pending/Running job and marks its Queued pages Skipped. False if the job is missing or already terminal.</summary>
     Task<bool> CancelJobAsync(Guid jobId, CancellationToken cancellationToken);
+
+    /// <summary>Fails a Pending/Running job (e.g. its root message could not be published) and marks its Queued pages Skipped. False if the job is missing or already terminal.</summary>
+    Task<bool> FailJobAsync(Guid jobId, string reason, CancellationToken cancellationToken);
 }

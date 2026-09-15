@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Alteva.Domain.Services;
 using Alteva.Infrastructure.Data;
 using Alteva.Infrastructure.Messaging;
@@ -38,7 +39,9 @@ builder.Services.AddCors(options =>
     });
 });
 
-builder.Services.AddControllers();
+// Enums (job and page statuses) serialize as strings
+builder.Services.AddControllers()
+    .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 builder.Services.AddHealthChecks();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
