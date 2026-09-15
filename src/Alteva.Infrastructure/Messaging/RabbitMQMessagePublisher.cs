@@ -39,11 +39,15 @@ public class RabbitMQMessagePublisher : IMessagePublisher, IDisposable
 
         EnsureConnected();
 
+        // Serialize outside the lock: pure computation with no shared state, so concurrent
+        // callers shouldn't queue up behind each other for it.
+        var key = routingKey ?? _options.RoutingKey;
+        var payload = JsonSerializer.SerializeToUtf8Bytes(message);
+
+        // IModel (the channel) is not thread-safe, so only the actual channel operations
+        // need to be serialized - not the JSON encoding or logging around them.
         lock (_syncLock)
         {
-            var key = routingKey ?? _options.RoutingKey;
-            var payload = JsonSerializer.SerializeToUtf8Bytes(message);
-
             var properties = _channel!.CreateBasicProperties();
             properties.Persistent = true;
             properties.DeliveryMode = 2;
@@ -56,10 +60,10 @@ public class RabbitMQMessagePublisher : IMessagePublisher, IDisposable
                 mandatory: false,
                 basicProperties: properties,
                 body: payload);
-
-            _logger.LogInformation("Published event of type {MessageType} to exchange '{Exchange}' with routing key '{RoutingKey}'",
-                typeof(T).Name, _options.ExchangeName, key);
         }
+
+        _logger.LogInformation("Published event of type {MessageType} to exchange '{Exchange}' with routing key '{RoutingKey}'",
+            typeof(T).Name, _options.ExchangeName, key);
 
         return Task.CompletedTask;
     }

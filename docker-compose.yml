@@ -70,6 +70,9 @@ services:
       - RabbitMQ__Port=5672
       - RabbitMQ__Username=${RABBITMQ_DEFAULT_USER:-guest}
       - RabbitMQ__Password=${RABBITMQ_DEFAULT_PASS:-guest}
+      - MAX_PAGES_SAFETY_LIMIT=${MAX_PAGES_SAFETY_LIMIT:-200}
+      - WORKER_MAX_CONCURRENT_JOBS=${WORKER_MAX_CONCURRENT_JOBS:-1}
+      - CRAWLER_MAX_CONCURRENT_PAGES=${CRAWLER_MAX_CONCURRENT_PAGES:-5}
     depends_on:
       rabbitmq:
         condition: service_healthy

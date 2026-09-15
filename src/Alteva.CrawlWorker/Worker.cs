@@ -30,6 +30,8 @@ public class Worker : BackgroundService
 
     private IConnection? _connection;
     private IModel? _channel;
+    private SemaphoreSlim? _jobConcurrencyLimiter;
+    private readonly object _channelLock = new();
     private const int MaxLoggedPayloadLength = 500;
 
     public Worker(
@@ -63,13 +65,21 @@ public class Worker : BackgroundService
         // Ensure RabbitMQ topology is declared
         DeclareTopology(_channel, options);
 
-        // Fair dispatch: prefetch 1 message at a time per worker instance
-        _channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
+        // How many crawl jobs this worker instance processes concurrently. Prefetch is set to
+        // match, so RabbitMQ keeps that many unacked deliveries in flight for us.
+        var maxConcurrentJobs = Math.Max(1, _configuration.GetValue<int>("WORKER_MAX_CONCURRENT_JOBS", 1));
+        var jobConcurrencyLimiter = new SemaphoreSlim(maxConcurrentJobs, maxConcurrentJobs);
+        _jobConcurrencyLimiter = jobConcurrencyLimiter;
+        _channel.BasicQos(prefetchSize: 0, prefetchCount: (ushort)Math.Clamp(maxConcurrentJobs, 1, ushort.MaxValue), global: false);
 
         var consumer = new AsyncEventingBasicConsumer(_channel);
         consumer.Received += async (sender, ea) =>
         {
-            await ProcessMessageAsync(ea, stoppingToken);
+            // Acquire a slot before returning from the handler, so the dispatcher can move on to
+            // deliver the next message immediately while this one processes in the background -
+            // that's what actually makes jobs run concurrently rather than one at a time.
+            await jobConcurrencyLimiter.WaitAsync(stoppingToken);
+            _ = ProcessMessageSafelyAsync(ea, stoppingToken, jobConcurrencyLimiter);
         };
         consumer.ConsumerCancelled += OnConsumerCancelledAsync;
 
@@ -86,6 +96,25 @@ public class Worker : BackgroundService
         await tcs.Task;
 
         _logger.LogInformation("Alteva Crawl Worker shutting down gracefully...");
+    }
+
+    private async Task ProcessMessageSafelyAsync(BasicDeliverEventArgs ea, CancellationToken stoppingToken, SemaphoreSlim jobConcurrencyLimiter)
+    {
+        try
+        {
+            await ProcessMessageAsync(ea, stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            // ProcessMessageAsync already acks/nacks on every path it expects; this is a
+            // last-resort guard so a truly unexpected exception can't crash the dispatch loop
+            // or leak a concurrency slot.
+            _logger.LogError(ex, "Unexpected exception escaped ProcessMessageAsync for delivery {DeliveryTag}.", ea.DeliveryTag);
+        }
+        finally
+        {
+            jobConcurrencyLimiter.Release();
+        }
     }
 
     private async Task ProcessMessageAsync(BasicDeliverEventArgs ea, CancellationToken stoppingToken)
@@ -115,7 +144,7 @@ public class Worker : BackgroundService
                 }
 
                 // Reject without requeue -> routes to Dead Letter Queue
-                _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
+                NackMessage(deliveryTag, requeue: false);
                 return;
             }
 
@@ -127,14 +156,14 @@ public class Worker : BackgroundService
             if (job == null)
             {
                 _logger.LogWarning("Job {JobId} not found in database. Discarding message.", message.JobId);
-                _channel?.BasicAck(deliveryTag, multiple: false);
+                AckMessage(deliveryTag);
                 return;
             }
 
             if (job.Status == JobStatus.Canceled)
             {
                 _logger.LogInformation("Job {JobId} was already canceled. Skipping crawl.", message.JobId);
-                _channel?.BasicAck(deliveryTag, multiple: false);
+                AckMessage(deliveryTag);
                 return;
             }
 
@@ -154,11 +183,12 @@ public class Worker : BackgroundService
 
             var maxDepth = message.MaxDepth > 0 ? message.MaxDepth : 2;
             var maxPages = _configuration.GetValue<int>("MAX_PAGES_SAFETY_LIMIT", 200);
+            var maxConcurrentPages = Math.Max(1, _configuration.GetValue<int>("CRAWLER_MAX_CONCURRENT_PAGES", 5));
 
-            _logger.LogInformation("Executing crawl for Job {JobId}: {Url} (MaxDepth={MaxDepth}, MaxPages={MaxPages})",
-                message.JobId, message.InputUrl, maxDepth, maxPages);
+            _logger.LogInformation("Executing crawl for Job {JobId}: {Url} (MaxDepth={MaxDepth}, MaxPages={MaxPages}, MaxConcurrentPages={MaxConcurrentPages})",
+                message.JobId, message.InputUrl, maxDepth, maxPages, maxConcurrentPages);
 
-            var crawlResult = await crawlerEngine.CrawlAsync(message.JobId, message.InputUrl, maxDepth, maxPages, stoppingToken);
+            var crawlResult = await crawlerEngine.CrawlAsync(message.JobId, message.InputUrl, maxDepth, maxPages, maxConcurrentPages, stoppingToken);
 
             if (crawlResult.Success)
             {
@@ -185,7 +215,7 @@ public class Worker : BackgroundService
 
                 await dbContext.SaveChangesAsync(stoppingToken);
 
-                _channel?.BasicAck(deliveryTag, multiple: false);
+                AckMessage(deliveryTag);
                 _logger.LogInformation("Job {JobId} completed successfully. Persisted {PageCount} pages and {EdgeCount} edges.",
                     message.JobId, crawlResult.Pages.Count, crawlResult.Edges.Count);
             }
@@ -201,13 +231,13 @@ public class Worker : BackgroundService
                 await dbContext.SaveChangesAsync(stoppingToken);
 
                 // Acknowledge because failure was recorded permanently in DB
-                _channel?.BasicAck(deliveryTag, multiple: false);
+                AckMessage(deliveryTag);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             _logger.LogWarning("Execution canceled for delivery {DeliveryTag}. Requeuing message.", deliveryTag);
-            _channel?.BasicNack(deliveryTag, multiple: false, requeue: true);
+            NackMessage(deliveryTag, requeue: true);
         }
         catch (JsonException ex)
         {
@@ -216,7 +246,7 @@ public class Worker : BackgroundService
 
             // No JobId can be recovered from unparseable JSON, so there is no Job row to mark Failed here.
             // Malformed JSON is not a transient failure; reject without requeue -> routes to Dead Letter Queue
-            _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
+            NackMessage(deliveryTag, requeue: false);
         }
         catch (Exception ex)
         {
@@ -228,7 +258,7 @@ public class Worker : BackgroundService
                 // row to track a retry count on. Route straight to DLQ rather than
                 // requeueing a message we can never make progress on.
                 _logger.LogError("Delivery {DeliveryTag} could not be attributed to a Job. Routing to DLQ.", deliveryTag);
-                _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
+                NackMessage(deliveryTag, requeue: false);
                 return;
             }
 
@@ -248,7 +278,7 @@ public class Worker : BackgroundService
                     $"Exceeded max retry attempts ({retryTracker.MaxRetryAttempts}) after repeated transient failures: {ex.Message}");
 
                 // Reject with requeue=false so RabbitMQ routes to Dead Letter Queue
-                _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
+                NackMessage(deliveryTag, requeue: false);
             }
             else
             {
@@ -257,7 +287,7 @@ public class Worker : BackgroundService
 
                 // Increment retry delay before requeue
                 await Task.Delay(TimeSpan.FromSeconds(2 * retryCount), stoppingToken);
-                _channel?.BasicNack(deliveryTag, multiple: false, requeue: true);
+                NackMessage(deliveryTag, requeue: true);
             }
         }
     }
@@ -329,6 +359,24 @@ public class Worker : BackgroundService
         return payload.Length > MaxLoggedPayloadLength
             ? string.Concat(payload.AsSpan(0, MaxLoggedPayloadLength), "... [truncated]")
             : payload;
+    }
+
+    // IModel (the channel) is not thread-safe. With multiple jobs now processed concurrently,
+    // every ack/nack must go through one of these rather than calling _channel directly.
+    private void AckMessage(ulong deliveryTag)
+    {
+        lock (_channelLock)
+        {
+            _channel?.BasicAck(deliveryTag, multiple: false);
+        }
+    }
+
+    private void NackMessage(ulong deliveryTag, bool requeue)
+    {
+        lock (_channelLock)
+        {
+            _channel?.BasicNack(deliveryTag, multiple: false, requeue: requeue);
+        }
     }
 
     private void DeclareTopology(IModel channel, RabbitMQOptions options)
@@ -429,6 +477,7 @@ public class Worker : BackgroundService
         _channel?.Dispose();
         _connection?.Close();
         _connection?.Dispose();
+        _jobConcurrencyLimiter?.Dispose();
         base.Dispose();
     }
 }
