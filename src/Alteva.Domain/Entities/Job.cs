@@ -52,4 +52,12 @@ public class Job
     /// Null if the job has not failed.
     /// </summary>
     public string? FailureReason { get; set; }
+
+    /// <summary>
+    /// Number of transient processing failures recorded for this job's current delivery.
+    /// Tracked on the row itself rather than a broker header, since the classic RabbitMQ
+    /// queue used for crawl jobs does not populate x-delivery-count. Used by the worker
+    /// to decide when to stop requeueing and route the message to the dead-letter queue.
+    /// </summary>
+    public int RetryCount { get; set; }
 }
