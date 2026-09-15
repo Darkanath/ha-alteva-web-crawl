@@ -42,6 +42,11 @@ builder.Services.AddHttpClient<ICrawlerEngine, CrawlerEngine>(client =>
 });
 
 // ==========================================
+// Retry Tracking (per-Job retry count, since classic queues don't set x-delivery-count)
+// ==========================================
+builder.Services.AddScoped<IRetryTracker, RetryTracker>();
+
+// ==========================================
 // Background Worker Hosted Service
 // ==========================================
 builder.Services.AddHostedService<Worker>();
