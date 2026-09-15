@@ -207,3 +207,46 @@ Secrets come only from `.env` (git-ignored); `.env.example` holds placeholders.
 2. **robots.txt and `Crawl-delay`;** stop following redirects to other hosts; honour `<base href>`; use a real HTML parser (e.g. AngleSharp).
 3. **Integration tests on real infrastructure** (Testcontainers for SQL Server and RabbitMQ), plus the smoke scenarios as an automated CI job.
 4. **Scale-out:** multiple workers with per-domain rate limiting and a partial tree for cancelled jobs.
+
+---
+
+## Development Effort (AI-Assisted)
+
+The project was built in two stages:
+
+| Stage | Tool | Time | Tokens |
+| :--- | :--- | :--- | :--- |
+| Preliminary setup (the original version of the project, before the refactor) | Antigravity | About 1 hour 10 minutes | About 700,000 |
+| Recursive page crawl refactor (PR #9): code review through final end-to-end run | Claude Code (Claude Opus 5) | About 2 hours 5 minutes | About 75M read / 297K written (≈10.2M effective, see below) |
+| **Total** | | **About 3 hours 15 minutes** | |
+
+The two token figures are not directly comparable, since each tool counts usage differently (the Claude Code numbers include every re-read of the conversation), so they are listed separately rather than added up. The rest of this section covers the Claude Code refactor session.
+
+### Time
+- **About 2 hours 5 minutes** of wall-clock time (20:06–22:11, 2026-09-15), including waiting for Docker builds, test runs and the ~10-minute end-to-end suite.
+- First commit of the refactor at 20:38, final merge at 22:08.
+
+### Tokens
+- **About 215 model requests.**
+- **About 75 million tokens read**, almost all of it (74.5M) the same conversation re-read from cache on each step, and **about 297,000 tokens written**.
+- **About 10.2 million effective tokens**, weighting re-read (cached) tokens at 0.1×, newly cached tokens at 2× and written output at 5× the cost of a regular input token.
+- One helper agent ran (the design review, "assumption hunter"), using about 0.24M effective tokens.
+
+### Where the tokens went (approximate)
+
+| Group | Effective tokens | Share |
+| :--- | ---: | ---: |
+| Reading & editing files | 3.76M | 37% |
+| Conversation & Claude's writing (plans, reviews, reasoning, summaries) | 3.15M | 31% |
+| Running commands & tests (builds, test runs, Docker, smoke/end-to-end scripts) | 1.42M | 14% |
+| Claude's standing instructions (built-in rules and tool list) | 1.35M | 13% |
+| Helper agent (design review) | 0.24M | 2% |
+| Other (reminders, questions) | 0.23M | 2% |
+| In-app browser (diagram checks) | 0.07M | <1% |
+| **Total** | **≈10.2M** | |
+
+- **Reading and editing files was the largest share.** Every file opened or changed stayed in the conversation and was re-read on every later step; several large files (the worker, the tests) were read many times.
+- **Talking and writing came second:** plans, reviews, explanations and summaries, plus reasoning. Written output is the most expensive kind of token.
+- **Running commands and tests** covers builds, test runs, Docker checks and the smoke and end-to-end scripts, whose output also stayed in the conversation.
+- **Standing instructions** are re-read on every step, which adds up over a long session.
+- **The biggest cost driver was length:** one long conversation meant everything done early was re-read on every later step. Starting fresh conversations for separate phases would have been cheaper.
