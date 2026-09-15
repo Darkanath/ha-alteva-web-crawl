@@ -30,6 +30,7 @@ public class Worker : BackgroundService
     private IConnection? _connection;
     private IModel? _channel;
     private const int MaxRetryAttempts = 3;
+    private const int MaxLoggedPayloadLength = 500;
 
     public Worker(
         IOptions<RabbitMQOptions> rabbitOptions,
@@ -101,7 +102,7 @@ public class Worker : BackgroundService
 
             if (message == null || message.JobId == Guid.Empty || string.IsNullOrWhiteSpace(message.InputUrl))
             {
-                _logger.LogWarning("Poison message detected (invalid payload). Routing directly to DLQ. Raw: {RawJson}", rawJson);
+                _logger.LogWarning("Poison message detected (invalid payload). Routing directly to DLQ. Raw: {RawJson}", TruncatePayloadForLogging(rawJson));
                 // Reject without requeue -> routes to Dead Letter Queue
                 _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
                 return;
@@ -188,6 +189,14 @@ public class Worker : BackgroundService
             _logger.LogWarning("Execution canceled for delivery {DeliveryTag}. Requeuing message.", deliveryTag);
             _channel?.BasicNack(deliveryTag, multiple: false, requeue: true);
         }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Poison message detected (malformed JSON). Routing directly to DLQ. DeliveryTag={DeliveryTag}, Raw: {RawJson}",
+                deliveryTag, TruncatePayloadForLogging(rawJson));
+
+            // Malformed JSON is not a transient failure; reject without requeue -> routes to Dead Letter Queue
+            _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unhandled exception processing delivery {DeliveryTag}.", deliveryTag);
@@ -211,6 +220,13 @@ public class Worker : BackgroundService
                 _channel?.BasicNack(deliveryTag, multiple: false, requeue: true);
             }
         }
+    }
+
+    private static string TruncatePayloadForLogging(string payload)
+    {
+        return payload.Length > MaxLoggedPayloadLength
+            ? string.Concat(payload.AsSpan(0, MaxLoggedPayloadLength), "... [truncated]")
+            : payload;
     }
 
     private static int GetRetryCount(IBasicProperties? properties)
