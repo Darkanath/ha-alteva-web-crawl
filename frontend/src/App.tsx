@@ -3,7 +3,6 @@ import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-do
 import { StartCrawlScreen } from './pages/StartCrawlScreen';
 import { JobDetailsScreen } from './pages/JobDetailsScreen';
 import { JobHistoryScreen } from './pages/JobHistoryScreen';
-import './App.css';
 
 function Nav() {
   const location = useLocation();

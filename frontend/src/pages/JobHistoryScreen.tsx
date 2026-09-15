@@ -38,7 +38,13 @@ export function JobHistoryScreen() {
     if (window.confirm('Are you sure you want to delete this crawl? This action cannot be undone.')) {
       try {
         await crawlerApi.deleteJob(id);
-        setRefreshKey(k => k + 1);
+        // Deleting the last item on a page beyond the first would otherwise leave
+        // the view stranded on a now-empty page; step back instead of refetching in place.
+        if (data && data.items.length === 1 && page > 1) {
+          setPage(p => p - 1);
+        } else {
+          setRefreshKey(k => k + 1);
+        }
       } catch (err: any) {
         alert(err.message || 'Failed to delete job');
       }
@@ -109,7 +115,7 @@ export function JobHistoryScreen() {
                     </Link>
                     <button 
                       className="btn" 
-                      style={{ padding: '0.25rem 0.75rem', fontSize: '0.875rem', backgroundColor: 'var(--error)', color: 'white', border: 'none' }}
+                      style={{ padding: '0.25rem 0.75rem', fontSize: '0.875rem', backgroundColor: 'hsl(var(--error))', color: 'white', border: 'none' }}
                       onClick={() => handleDelete(job.id, job.status)}
                     >
                       Delete

@@ -25,6 +25,11 @@ export function JobDetailsScreen() {
   };
 
   useEffect(() => {
+    // Clear the previous job before fetching, so navigating directly between two
+    // job URLs doesn't briefly render the old job's data under the new job's id.
+    setJob(null);
+    setError(null);
+    setLoading(true);
     fetchJob();
   }, [id]);
 
