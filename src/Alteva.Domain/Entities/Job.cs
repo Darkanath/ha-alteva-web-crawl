@@ -60,11 +60,4 @@ public class Job
     /// to decide when to stop requeueing and route the message to the dead-letter queue.
     /// </summary>
     public int RetryCount { get; set; }
-
-    /// <summary>
-    /// Number of distinct pages claimed for this job (root included). Incremented atomically
-    /// when new pages are claimed and capped by the page safety limit. Re-queuing an existing
-    /// page at a shorter depth does not count against it.
-    /// </summary>
-    public int ClaimedPages { get; set; }
 }

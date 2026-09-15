@@ -45,8 +45,7 @@ namespace Alteva.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("JobId", "ParentUrl", "ChildUrl")
-                        .IsUnique();
+                    b.HasIndex("JobId");
 
                     b.ToTable("Edges");
                 });
@@ -56,9 +55,6 @@ namespace Alteva.Infrastructure.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
-
-                    b.Property<int>("ClaimedPages")
-                        .HasColumnType("int");
 
                     b.Property<DateTime?>("CompletedAt")
                         .HasColumnType("datetime2");
@@ -112,9 +108,6 @@ namespace Alteva.Infrastructure.Migrations
                     b.Property<Guid>("JobId")
                         .HasColumnType("uniqueidentifier");
 
-                    b.Property<int>("RetryCount")
-                        .HasColumnType("int");
-
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -125,11 +118,17 @@ namespace Alteva.Infrastructure.Migrations
                         .HasMaxLength(2048)
                         .HasColumnType("nvarchar(2048)");
 
+                    b.Property<byte[]>("UrlHash")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("binary(32)")
+                        .IsFixedLength();
+
                     b.HasKey("Id");
 
                     b.HasIndex("JobId", "Status");
 
-                    b.HasIndex("JobId", "Url")
+                    b.HasIndex("JobId", "UrlHash")
                         .IsUnique();
 
                     b.ToTable("Pages");

@@ -98,46 +98,29 @@ public class AppDbContextIdempotencyTests : IDisposable
         var act = async () => await context.SaveChangesAsync();
         var ex = await act.Should().ThrowAsync<DbUpdateException>();
         ex.WithInnerException<SqliteException>()
-            .WithMessage("*UNIQUE constraint failed: Pages.JobId, Pages.Url*");
+            .WithMessage("*UNIQUE constraint failed: Pages.JobId, Pages.UrlHash*");
     }
 
     [Fact]
-    public async Task Edges_UniqueIndex_PreventsDuplicateEdgePerJob_EnsuringIdempotency()
+    public async Task Pages_UniqueIndex_TreatsUrlsDifferingOnlyByCaseAsDistinct_AndRoundTripsHash()
     {
         var jobId = Guid.NewGuid();
-        using var context = new AppDbContext(_options);
-        
-        var job = new Job
+        using (var context = new AppDbContext(_options))
         {
-            Id = jobId,
-            InputUrl = "https://example.com",
-            Status = JobStatus.Running
-        };
-        context.Jobs.Add(job);
-        await context.SaveChangesAsync();
+            context.Jobs.Add(new Job { Id = jobId, InputUrl = "https://example.com", Status = JobStatus.Running });
+            context.Pages.Add(new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/About" });
+            context.Pages.Add(new Page { Id = Guid.NewGuid(), JobId = jobId, Url = "https://example.com/about" });
+            await context.SaveChangesAsync();
+        }
 
-        var edge1 = new Edge
+        using (var context = new AppDbContext(_options))
         {
-            JobId = jobId,
-            ParentUrl = "https://example.com/",
-            ChildUrl = "https://example.com/about"
-        };
-        context.Edges.Add(edge1);
-        await context.SaveChangesAsync();
+            var expectedHash = Alteva.Domain.Services.UrlHasher.Hash("https://example.com/About");
+            var page = await context.Pages.SingleAsync(p => p.JobId == jobId && p.UrlHash == expectedHash);
 
-        // Duplicate edge for same job
-        var edge2 = new Edge
-        {
-            JobId = jobId,
-            ParentUrl = "https://example.com/",
-            ChildUrl = "https://example.com/about"
-        };
-        context.Edges.Add(edge2);
-
-        var act = async () => await context.SaveChangesAsync();
-        var ex = await act.Should().ThrowAsync<DbUpdateException>();
-        ex.WithInnerException<SqliteException>()
-            .WithMessage("*UNIQUE constraint failed: Edges.JobId, Edges.ParentUrl, Edges.ChildUrl*");
+            page.Url.Should().Be("https://example.com/About");
+            (await context.Pages.CountAsync(p => p.JobId == jobId)).Should().Be(2);
+        }
     }
 
     [Fact]
@@ -147,7 +130,7 @@ public class AppDbContextIdempotencyTests : IDisposable
         var pageId = Guid.NewGuid();
         using (var context = new AppDbContext(_options))
         {
-            context.Jobs.Add(new Job { Id = jobId, InputUrl = "https://example.com", Status = JobStatus.Running, ClaimedPages = 1 });
+            context.Jobs.Add(new Job { Id = jobId, InputUrl = "https://example.com", Status = JobStatus.Running });
             context.Pages.Add(new Page { Id = pageId, JobId = jobId, Url = "https://example.com/", Depth = 1 });
             await context.SaveChangesAsync();
         }
@@ -160,7 +143,6 @@ public class AppDbContextIdempotencyTests : IDisposable
             claimed.Depth.Should().Be(1);
 
             claimed.Status = PageStatus.Failed;
-            claimed.RetryCount = 3;
             claimed.FailureReason = "HTTP 503";
             await context.SaveChangesAsync();
         }
@@ -169,16 +151,10 @@ public class AppDbContextIdempotencyTests : IDisposable
         {
             var page = await context.Pages.SingleAsync(p => p.Id == pageId);
             page.Status.Should().Be(PageStatus.Failed);
-            page.RetryCount.Should().Be(3);
             page.FailureReason.Should().Be("HTTP 503");
 
-            var job = await context.Jobs.FindAsync(jobId);
-            job!.ClaimedPages.Should().Be(1);
-
             // The completion check filters on the stored status value
-            var unfinished = await context.Pages
-                .CountAsync(p => p.JobId == jobId && (p.Status == PageStatus.Queued || p.Status == PageStatus.Processing));
-            unfinished.Should().Be(0);
+            (await context.Pages.AnyAsync(p => p.JobId == jobId && p.Status == PageStatus.Queued)).Should().BeFalse();
         }
     }
 

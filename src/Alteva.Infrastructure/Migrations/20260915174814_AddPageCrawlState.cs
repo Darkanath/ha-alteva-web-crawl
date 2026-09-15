@@ -10,6 +10,14 @@ namespace Alteva.Infrastructure.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.DropIndex(
+                name: "IX_Pages_JobId_Url",
+                table: "Pages");
+
+            migrationBuilder.DropIndex(
+                name: "IX_Edges_JobId_ParentUrl_ChildUrl",
+                table: "Edges");
+
             migrationBuilder.AlterColumn<double>(
                 name: "DomainLinkRatio",
                 table: "Pages",
@@ -32,13 +40,6 @@ namespace Alteva.Infrastructure.Migrations
                 maxLength: 2048,
                 nullable: true);
 
-            migrationBuilder.AddColumn<int>(
-                name: "RetryCount",
-                table: "Pages",
-                type: "int",
-                nullable: false,
-                defaultValue: 0);
-
             migrationBuilder.AddColumn<string>(
                 name: "Status",
                 table: "Pages",
@@ -48,20 +49,34 @@ namespace Alteva.Infrastructure.Migrations
                 // Pages persisted before this migration were only ever written once fully crawled.
                 defaultValue: "Done");
 
-            migrationBuilder.AddColumn<int>(
-                name: "ClaimedPages",
-                table: "Jobs",
-                type: "int",
+            migrationBuilder.AddColumn<byte[]>(
+                name: "UrlHash",
+                table: "Pages",
+                type: "binary(32)",
+                fixedLength: true,
+                maxLength: 32,
                 nullable: false,
-                defaultValue: 0);
+                defaultValue: new byte[0]);
 
-            migrationBuilder.Sql(
-                "UPDATE j SET ClaimedPages = (SELECT COUNT(*) FROM Pages p WHERE p.JobId = j.Id) FROM Jobs j;");
+            // Backfill before the unique index is created. HASHBYTES over nvarchar hashes the
+            // UTF-16LE bytes, matching UrlHasher.Hash in the application.
+            migrationBuilder.Sql("UPDATE Pages SET UrlHash = HASHBYTES('SHA2_256', Url);");
 
             migrationBuilder.CreateIndex(
                 name: "IX_Pages_JobId_Status",
                 table: "Pages",
                 columns: new[] { "JobId", "Status" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Pages_JobId_UrlHash",
+                table: "Pages",
+                columns: new[] { "JobId", "UrlHash" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Edges_JobId",
+                table: "Edges",
+                column: "JobId");
         }
 
         /// <inheritdoc />
@@ -70,6 +85,14 @@ namespace Alteva.Infrastructure.Migrations
             migrationBuilder.DropIndex(
                 name: "IX_Pages_JobId_Status",
                 table: "Pages");
+
+            migrationBuilder.DropIndex(
+                name: "IX_Pages_JobId_UrlHash",
+                table: "Pages");
+
+            migrationBuilder.DropIndex(
+                name: "IX_Edges_JobId",
+                table: "Edges");
 
             migrationBuilder.DropColumn(
                 name: "Depth",
@@ -80,16 +103,12 @@ namespace Alteva.Infrastructure.Migrations
                 table: "Pages");
 
             migrationBuilder.DropColumn(
-                name: "RetryCount",
-                table: "Pages");
-
-            migrationBuilder.DropColumn(
                 name: "Status",
                 table: "Pages");
 
             migrationBuilder.DropColumn(
-                name: "ClaimedPages",
-                table: "Jobs");
+                name: "UrlHash",
+                table: "Pages");
 
             migrationBuilder.AlterColumn<double>(
                 name: "DomainLinkRatio",
@@ -100,6 +119,18 @@ namespace Alteva.Infrastructure.Migrations
                 oldClrType: typeof(double),
                 oldType: "float",
                 oldNullable: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Pages_JobId_Url",
+                table: "Pages",
+                columns: new[] { "JobId", "Url" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Edges_JobId_ParentUrl_ChildUrl",
+                table: "Edges",
+                columns: new[] { "JobId", "ParentUrl", "ChildUrl" },
+                unique: true);
         }
     }
 }

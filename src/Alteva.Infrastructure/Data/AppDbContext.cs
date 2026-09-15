@@ -1,4 +1,5 @@
 using Alteva.Domain.Entities;
+using Alteva.Domain.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace Alteva.Infrastructure.Data;
@@ -60,10 +61,15 @@ public class AppDbContext : DbContext
                 .IsRequired()
                 .HasMaxLength(2048);
 
+            entity.Property(e => e.UrlHash)
+                .HasMaxLength(UrlHasher.HashLength)
+                .IsFixedLength();
+
             // CRITICAL: Idempotency constraint.
             // A specific URL should only have one Page record per Job.
-            // This allows safe upserts if a worker retries a message.
-            entity.HasIndex(e => new { e.JobId, e.Url })
+            // Keyed on the URL hash: the URL itself can exceed SQL Server's index key size and
+            // would compare case-insensitively under the default collation.
+            entity.HasIndex(e => new { e.JobId, e.UrlHash })
                 .IsUnique();
 
             entity.Property(e => e.Status)
@@ -73,7 +79,7 @@ public class AppDbContext : DbContext
             entity.Property(e => e.FailureReason)
                 .HasMaxLength(2048);
 
-            // Supports the job-completion check: "any Queued/Processing pages left for this job?"
+            // Supports the job-completion check: "any Queued pages left for this job?"
             entity.HasIndex(e => new { e.JobId, e.Status });
 
             // Setup foreign key relationship
@@ -98,11 +104,9 @@ public class AppDbContext : DbContext
                 .IsRequired()
                 .HasMaxLength(2048);
 
-            // CRITICAL: Idempotency constraint.
-            // An edge between a specific parent and child should only exist once per Job.
-            // This prevents duplicate edges on worker retry.
-            entity.HasIndex(e => new { e.JobId, e.ParentUrl, e.ChildUrl })
-                .IsUnique();
+            // No unique index: a page's edges are deduplicated in memory and written in the same
+            // transaction that marks the page Done, and a Done page is never processed again.
+            // (A URL-based unique index would also exceed SQL Server's 1700-byte key limit.)
 
             // Setup foreign key relationship
             entity.HasOne<Job>()

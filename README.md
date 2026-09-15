@@ -64,8 +64,8 @@ The system employs reliable message queuing to prevent job loss during traffic s
 
 ### 3. Idempotency Strategy
 Idempotency and duplicate suppression are enforced strictly at the database layer using EF Core:
-- **Pages**: A composite unique index on `(JobId, Url)` ensures a page is never recorded twice for the same job.
-- **Edges**: A composite unique index on `(JobId, ParentUrl, ChildUrl)` ensures the exact same directed link is only recorded once.
+- **Pages**: A composite unique index on `(JobId, UrlHash)` (SHA-256 of the normalized URL) ensures a page is never recorded twice for the same job. Hashing keeps the index key within SQL Server's 1700-byte limit and compares URLs case-sensitively.
+- **Edges**: Deduplicated in memory per page and written together with the page, so no unique index is needed.
 - *In the event of duplicate processing (e.g. network partition during a DB commit), the unique constraints protect data integrity.*
 
 ### 4. Domain Logic: Domain Link Ratio

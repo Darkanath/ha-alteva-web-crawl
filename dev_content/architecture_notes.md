@@ -65,6 +65,41 @@ To guarantee idempotency:
 
 ---
 
+## 3a. Recursive Page Crawl (Target Design — in progress on `feat/recursive-page-crawl`)
+
+Replaces the one-message-per-job in-memory BFS above. Each message is **one page**.
+
+### Contract
+`CrawlPageMessage { jobId, url, depth, maxDepth }` — `url` is normalized and matches `Pages.Url`.
+
+### Invariants
+1. **Exactly one worker consumer, prefetch 1, no parallelism.** Messages are processed FIFO, so every depth-*d* page of a job is processed before any depth-*d+1* page: a page is always first claimed at its shortest depth.
+2. **A page is claimed by inserting `Page(Queued)`.** The unique index `(JobId, UrlHash)` (SHA-256 of the URL, see `UrlHasher`) makes a URL claimable once per job. A message is published only for a page this worker just claimed.
+3. **Page lifecycle:** `Queued` → `Done` | `Failed` | `Skipped`. A job is complete when it has no `Queued` pages.
+4. **Politeness:** a random 3–5 s delay (`CRAWLER_DELAY_MIN/MAX_SECONDS`) precedes every download.
+
+### Flow
+1. **API `POST`:** insert `Job(Pending)` + root `Page(Queued, depth 0)` in one transaction, then publish.
+2. **Worker gate (first step, no delay):** if the job is not `Pending`/`Running`, or the page is not `Queued` → ack and discard.
+3. **Delay, then download** — both abortable by cancellation (below).
+4. **One transaction:**
+   1. `UPDATE Jobs SET Status = 'Running' WHERE Id = @id AND Status IN ('Pending','Running')` — 0 rows → roll back, ack, discard.
+   2. Mark the page `Done`/`Failed`/`Skipped`; insert its edges (deduplicated in memory).
+   3. If `depth < maxDepth` and the job's page count is under `MAX_PAGES_SAFETY_LIMIT`: insert new same-domain children as `Queued` at `depth + 1`.
+   4. If no `Queued` pages remain → job `Completed`.
+5. Publish the newly claimed children, then ack.
+6. **Redelivery:** a message for an already finished page republishes that page's children still `Queued` (covers a crash between commit and publish). A redelivered message for a `Queued` page (`BasicDeliverEventArgs.Redelivered`) marks the page `Failed` instead of retrying again.
+
+### Cancellation
+RabbitMQ cannot delete selected messages from a queue, so cancellation guarantees that a cancelled job's messages are **never processed**, rather than physically removed:
+1. **API cancel** — one transaction: `Job` `Pending`/`Running` → `Canceled`; all of its `Queued` pages → `Skipped` (`FailureReason = "Job canceled"`).
+2. **Pending messages** are discarded at the worker gate (flow step 2): no delay, no download, no writes, no children. They drain as fast as the worker reaches them.
+3. **In-flight page is aborted:** while a page is in its delay or download, the worker polls the job status every **1 s** (separate `DbContext` scope). If the job is no longer `Pending`/`Running`, it cancels a token linked to the host's stopping token, aborting the delay/HTTP request; the message is acked and discarded. Host shutdown (stopping token) still nacks with requeue — the two cancellations must be distinguished.
+4. **Commit guard:** a cancel landing after the last poll is caught by flow step 4.1, so nothing is persisted and no children are published for a cancelled job.
+5. Children published in the instant between commit and a cancel are discarded at the gate.
+
+---
+
 ## 4. Domain Link Ratio Specification
 
 $$\text{Domain Link Ratio} = \frac{\text{\# outgoing links within the starting domain}}{\text{total \# outgoing links}}$$

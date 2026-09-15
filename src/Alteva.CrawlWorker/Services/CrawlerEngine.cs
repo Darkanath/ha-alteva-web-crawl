@@ -103,7 +103,7 @@ public class CrawlerEngine : ICrawlerEngine
         }
 
         var edgeSet = new HashSet<(string Parent, string Child)>();
-        var enqueuedUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalizedRoot };
+        var enqueuedUrls = new HashSet<string>(StringComparer.Ordinal) { normalizedRoot };
         var frontier = new Queue<(string Url, int Depth)>();
 
         var rootPageResult = ComputePageResult(jobId, normalizedRoot, 0, rootOutcome.Html, maxDepth, startingHost);

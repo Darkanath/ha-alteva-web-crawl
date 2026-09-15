@@ -25,16 +25,16 @@ public class JobTreeBuilder(IUrlNormalizer urlNormalizer) : IJobTreeBuilder
 
         // Map pages by normalized URL for O(1) ratio lookups
         var pageMap = pages
-            .GroupBy(p => p.Url, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            .GroupBy(p => p.Url, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
 
         // Group edges by parent URL for O(1) children lookups
         var edgeGroup = edges
-            .GroupBy(e => e.ParentUrl, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(e => e.ParentUrl, StringComparer.Ordinal)
             .ToDictionary(
                 g => g.Key,
-                g => g.Select(e => e.ChildUrl).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
-                StringComparer.OrdinalIgnoreCase);
+                g => g.Select(e => e.ChildUrl).Distinct(StringComparer.Ordinal).ToList(),
+                StringComparer.Ordinal);
 
         var rootPage = pageMap.TryGetValue(normalizedRoot, out var p) ? p : null;
         var rootNode = new JobTreeNode
@@ -44,7 +44,7 @@ public class JobTreeBuilder(IUrlNormalizer urlNormalizer) : IJobTreeBuilder
             Depth = 0
         };
 
-        var currentPath = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalizedRoot };
+        var currentPath = new HashSet<string>(StringComparer.Ordinal) { normalizedRoot };
         PopulateChildren(rootNode, edgeGroup, pageMap, currentPath, 0, maxDepth);
 
         return rootNode;
