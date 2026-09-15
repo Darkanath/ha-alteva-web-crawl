@@ -1,6 +1,7 @@
-# Alteva Web Crawler System
+# Home Assignment - Alteva - Web Crawler System
 
-A job-based, event-driven web crawler. A user submits a URL; the crawl runs asynchronously through RabbitMQ — **one message per page, recursively, up to the requested depth** — and the React UI shows progress and, once complete, a tree of discovered pages with each page's **Domain Link Ratio**.
+## Overview
+This is a home assignment for a job-based, event-driven web crawler. A user submits a URL; the crawl runs asynchronously through RabbitMQ — **one message per page, recursively, up to the requested depth** — and the React UI shows progress and, once complete, a tree of discovered pages with each page's **Domain Link Ratio**.
 
 **Stack:** .NET 8 (ASP.NET Core API + worker) · React 19 + Vite · RabbitMQ · SQL Server (EF Core) · Docker Compose
 
