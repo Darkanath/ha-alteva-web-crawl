@@ -32,6 +32,7 @@ public class Worker : BackgroundService
     private IModel? _channel;
     private const int MaxRetryAttempts = 3;
     private const int MaxLoggedPayloadLength = 500;
+    private const string RetryCountHeader = "x-retry-count";
 
     public Worker(
         IOptions<RabbitMQOptions> rabbitOptions,
@@ -93,13 +94,14 @@ public class Worker : BackgroundService
     {
         var deliveryTag = ea.DeliveryTag;
         string rawJson = string.Empty;
+        CrawlJobRequestedMessage? message = null;
 
         try
         {
             rawJson = Encoding.UTF8.GetString(ea.Body.ToArray());
             _logger.LogInformation("Received crawl job message. DeliveryTag={DeliveryTag}, Length={Length}", deliveryTag, rawJson.Length);
 
-            var message = JsonSerializer.Deserialize<CrawlJobRequestedMessage>(rawJson, new JsonSerializerOptions
+            message = JsonSerializer.Deserialize<CrawlJobRequestedMessage>(rawJson, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });
@@ -107,6 +109,13 @@ public class Worker : BackgroundService
             if (message == null || message.JobId == Guid.Empty || string.IsNullOrWhiteSpace(message.InputUrl))
             {
                 _logger.LogWarning("Poison message detected (invalid payload). Routing directly to DLQ. Raw: {RawJson}", TruncatePayloadForLogging(rawJson));
+
+                // A JobId lets us record the failure even though the payload is otherwise unusable
+                if (message != null && message.JobId != Guid.Empty)
+                {
+                    await MarkJobFailedAsync(message.JobId, "Message payload failed validation (missing or invalid InputUrl).");
+                }
+
                 // Reject without requeue -> routes to Dead Letter Queue
                 _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
                 return;
@@ -198,6 +207,7 @@ public class Worker : BackgroundService
             _logger.LogWarning(ex, "Poison message detected (malformed JSON). Routing directly to DLQ. DeliveryTag={DeliveryTag}, Raw: {RawJson}",
                 deliveryTag, TruncatePayloadForLogging(rawJson));
 
+            // No JobId can be recovered from unparseable JSON, so there is no Job row to mark Failed here.
             // Malformed JSON is not a transient failure; reject without requeue -> routes to Dead Letter Queue
             _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
         }
@@ -211,17 +221,28 @@ public class Worker : BackgroundService
                 _logger.LogError("Job delivery {DeliveryTag} exceeded max retry attempts ({MaxRetryAttempts}). Routing to DLQ.",
                     deliveryTag, MaxRetryAttempts);
 
+                if (message != null)
+                {
+                    await MarkJobFailedAsync(message.JobId, $"Processing failed after {MaxRetryAttempts} retries: {ex.Message}");
+                }
+
                 // Reject with requeue=false so RabbitMQ routes to Dead Letter Queue
                 _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
             }
             else
             {
+                var nextRetryCount = retryCount + 1;
                 _logger.LogWarning("Job delivery {DeliveryTag} encountered transient failure (attempt {Attempt}/{MaxAttempts}). Requeuing.",
-                    deliveryTag, retryCount + 1, MaxRetryAttempts);
+                    deliveryTag, nextRetryCount, MaxRetryAttempts);
 
                 // Increment retry delay before requeue
-                await Task.Delay(TimeSpan.FromSeconds(2 * (retryCount + 1)), stoppingToken);
-                _channel?.BasicNack(deliveryTag, multiple: false, requeue: true);
+                await Task.Delay(TimeSpan.FromSeconds(2 * nextRetryCount), stoppingToken);
+
+                // Classic queues (declared in DeclareTopology) don't populate x-delivery-count, so we
+                // track attempts ourselves: republish a copy carrying our own retry-count header, then
+                // ack the original delivery. This keeps GetRetryCount accurate on classic queues.
+                RepublishWithRetryCount(ea, nextRetryCount);
+                _channel?.BasicAck(deliveryTag, multiple: false);
             }
         }
     }
@@ -260,6 +281,59 @@ public class Worker : BackgroundService
         _hostApplicationLifetime.StopApplication();
     }
 
+    private void RepublishWithRetryCount(BasicDeliverEventArgs ea, int retryCount)
+    {
+        if (_channel == null)
+        {
+            return;
+        }
+
+        var options = _rabbitOptions.Value;
+        var properties = _channel.CreateBasicProperties();
+        properties.Persistent = true;
+        properties.DeliveryMode = 2;
+        properties.ContentType = ea.BasicProperties?.ContentType ?? "application/json";
+        properties.Headers = new Dictionary<string, object>
+        {
+            { RetryCountHeader, retryCount }
+        };
+
+        _channel.BasicPublish(
+            exchange: options.ExchangeName,
+            routingKey: options.RoutingKey,
+            mandatory: false,
+            basicProperties: properties,
+            body: ea.Body);
+    }
+
+    private async Task MarkJobFailedAsync(Guid jobId, string failureReason)
+    {
+        try
+        {
+            // Use a fresh scope/DbContext (not the one active when the failure occurred) so this
+            // still succeeds when the original failure was itself a database error, and use
+            // CancellationToken.None so the failure is recorded even if the host is shutting down.
+            using var scope = _scopeFactory.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var job = await dbContext.Jobs.FirstOrDefaultAsync(j => j.Id == jobId, CancellationToken.None);
+            if (job == null)
+            {
+                return;
+            }
+
+            job.Status = JobStatus.Failed;
+            job.CompletedAt = DateTime.UtcNow;
+            job.FailureReason = failureReason;
+
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to mark Job {JobId} as Failed after dead-lettering.", jobId);
+        }
+    }
+
     private static string TruncatePayloadForLogging(string payload)
     {
         return payload.Length > MaxLoggedPayloadLength
@@ -269,7 +343,7 @@ public class Worker : BackgroundService
 
     private static int GetRetryCount(IBasicProperties? properties)
     {
-        if (properties?.Headers != null && properties.Headers.TryGetValue("x-delivery-count", out var countObj))
+        if (properties?.Headers != null && properties.Headers.TryGetValue(RetryCountHeader, out var countObj))
         {
             if (countObj is long l) return (int)l;
             if (countObj is int i) return i;
