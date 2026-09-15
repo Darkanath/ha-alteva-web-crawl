@@ -54,13 +54,15 @@ gantt
 ---
 
 ## Milestone 3: Event-Driven Worker Pipeline & Idempotent Persistence
-- **Status:** Active (In Progress)
+- **Status:** Complete (100%)
 - **Target:** Reliable message consumption, automated retries for transient HTTP/DB failures, dead-letter queue (DLQ) handling, and idempotent writes.
 - **Key Deliverables:**
-  - RabbitMQ consumer binding with explicit acknowledgments (`ack` / `nack`).
-  - Worker lifecycle management: transition job to `Running`, execute `CrawlerEngine`, transition to `Completed` or `Failed`.
-  - Idempotent upserts / duplicate suppression using composite DB keys `(JobId, Url)` and `(JobId, ParentUrl, ChildUrl)`.
-  - Dead-letter exchange (`dlx`) routing poison messages after retry exhaustion.
+  - RabbitMQ consumer service (`Worker`) with prefetch limit (`BasicQos(0, 1, false)`) and explicit acknowledgments (`ack` / `nack`).
+  - Worker lifecycle management: transitions job to `Running`, executes `CrawlerEngine`, transitions to `Completed` or `Failed`.
+  - Idempotent upserts / duplicate suppression using composite DB keys and pre-save cleanup per `JobId`.
+  - Dead-letter exchange (`dlx`) routing poison messages and retry exhaustion to DLQ.
+  - End-to-end verified via Docker Compose with live crawl of `https://example.com/` and recursive tree assembly.
+  - 9 automated unit/integration tests in `Alteva.CrawlWorker.Tests` (70 total .NET tests passing across solution).
 
 ---
 
