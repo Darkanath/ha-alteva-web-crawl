@@ -25,6 +25,7 @@ public class Worker : BackgroundService
     private readonly IOptions<RabbitMQOptions> _rabbitOptions;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
+    private readonly IHostApplicationLifetime _hostApplicationLifetime;
     private readonly ILogger<Worker> _logger;
 
     private IConnection? _connection;
@@ -36,11 +37,13 @@ public class Worker : BackgroundService
         IOptions<RabbitMQOptions> rabbitOptions,
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
+        IHostApplicationLifetime hostApplicationLifetime,
         ILogger<Worker> logger)
     {
         _rabbitOptions = rabbitOptions ?? throw new ArgumentNullException(nameof(rabbitOptions));
         _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        _hostApplicationLifetime = hostApplicationLifetime ?? throw new ArgumentNullException(nameof(hostApplicationLifetime));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -69,6 +72,7 @@ public class Worker : BackgroundService
         {
             await ProcessMessageAsync(ea, stoppingToken);
         };
+        consumer.ConsumerCancelled += OnConsumerCancelledAsync;
 
         _channel.BasicConsume(
             queue: options.QueueName,
@@ -222,6 +226,40 @@ public class Worker : BackgroundService
         }
     }
 
+    private Task OnConsumerCancelledAsync(object sender, ConsumerEventArgs e)
+    {
+        _logger.LogError(
+            "RabbitMQ consumer was cancelled unexpectedly (ConsumerTags={ConsumerTags}). This usually indicates an unrecoverable topology change (e.g. the queue was deleted). Stopping the worker host so the container can be restarted.",
+            string.Join(",", e.ConsumerTags));
+
+        _hostApplicationLifetime.StopApplication();
+        return Task.CompletedTask;
+    }
+
+    private void OnConnectionShutdown(object? sender, ShutdownEventArgs e)
+    {
+        if (e.Initiator == ShutdownInitiator.Application)
+        {
+            _logger.LogInformation("RabbitMQ connection closed (ReplyCode={ReplyCode}, ReplyText={ReplyText}).", e.ReplyCode, e.ReplyText);
+            return;
+        }
+
+        _logger.LogWarning(
+            "RabbitMQ connection was lost unexpectedly (Initiator={Initiator}, ReplyCode={ReplyCode}, ReplyText={ReplyText}). Automatic recovery will attempt to reconnect.",
+            e.Initiator, e.ReplyCode, e.ReplyText);
+    }
+
+    private void OnConnectionRecoverySucceeded(object? sender, EventArgs e)
+    {
+        _logger.LogInformation("RabbitMQ connection automatically recovered successfully.");
+    }
+
+    private void OnConnectionRecoveryError(object? sender, ConnectionRecoveryErrorEventArgs e)
+    {
+        _logger.LogError(e.Exception, "RabbitMQ automatic recovery failed after exhausting retry attempts. Stopping the worker host so the container can be restarted.");
+        _hostApplicationLifetime.StopApplication();
+    }
+
     private static string TruncatePayloadForLogging(string payload)
     {
         return payload.Length > MaxLoggedPayloadLength
@@ -294,7 +332,9 @@ public class Worker : BackgroundService
             Port = options.Port,
             UserName = options.Username,
             Password = options.Password,
-            DispatchConsumersAsync = true
+            DispatchConsumersAsync = true,
+            AutomaticRecoveryEnabled = true,
+            TopologyRecoveryEnabled = true
         };
 
         const int maxAttempts = 10;
@@ -308,6 +348,13 @@ public class Worker : BackgroundService
                     options.Host, options.Port, attempt, maxAttempts);
 
                 _connection = factory.CreateConnection("alteva-crawl-worker");
+                _connection.ConnectionShutdown += OnConnectionShutdown;
+                if (_connection is IAutorecoveringConnection recoverableConnection)
+                {
+                    recoverableConnection.RecoverySucceeded += OnConnectionRecoverySucceeded;
+                    recoverableConnection.ConnectionRecoveryError += OnConnectionRecoveryError;
+                }
+
                 _channel = _connection.CreateModel();
                 _logger.LogInformation("Successfully connected to RabbitMQ.");
                 return;
