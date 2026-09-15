@@ -25,6 +25,11 @@ public class CrawlerEngine(
 
     private readonly record struct PageFetchOutcome(string? Html, bool IsHardFailure, string? ErrorMessage);
 
+    private readonly record struct PageProcessingResult(
+        Page Page,
+        List<(string Parent, string Child)> EdgeKeys,
+        List<string> NextLevelCandidates);
+
     public async Task<CrawlExecutionResult> CrawlAsync(
         Guid jobId,
         string rootUrl,
@@ -82,12 +87,13 @@ public class CrawlerEngine(
             return result;
         }
 
-        List<string> currentLevelUrls;
+        var rootPageResult = ComputePageResult(jobId, normalizedRoot, 0, rootOutcome.Html, maxDepth, startingHost);
         lock (syncLock)
         {
             visitedUrls.Add(normalizedRoot);
-            currentLevelUrls = ProcessFetchedPage(jobId, normalizedRoot, 0, rootOutcome.Html, maxDepth, startingHost, edgeSet, result);
+            MergePageResult(rootPageResult, edgeSet, result);
         }
+        var currentLevelUrls = rootPageResult.NextLevelCandidates;
 
         using var semaphore = new SemaphoreSlim(maxConcurrency, maxConcurrency);
         var depth = 1;
@@ -117,7 +123,6 @@ public class CrawlerEngine(
             }
 
             var nextLevelUrls = new List<string>();
-            var nextLevelLock = new object();
 
             var fetchTasks = toFetch.Select(async url =>
             {
@@ -137,16 +142,16 @@ public class CrawlerEngine(
                         return;
                     }
 
-                    List<string> discoveredNextLevel;
+                    // Regex link extraction, URL normalization and ratio math are pure CPU work
+                    // over this page's own HTML - do it outside the lock so concurrent fetches
+                    // don't serialize on it, and only take the lock for the actual state merge.
+                    var pageResult = ComputePageResult(jobId, url, depth, outcome.Html, maxDepth, startingHost);
+
                     lock (syncLock)
                     {
                         visitedUrls.Add(url);
-                        discoveredNextLevel = ProcessFetchedPage(jobId, url, depth, outcome.Html, maxDepth, startingHost, edgeSet, result);
-                    }
-
-                    lock (nextLevelLock)
-                    {
-                        nextLevelUrls.AddRange(discoveredNextLevel);
+                        MergePageResult(pageResult, edgeSet, result);
+                        nextLevelUrls.AddRange(pageResult.NextLevelCandidates);
                     }
                 }
                 finally
@@ -169,23 +174,22 @@ public class CrawlerEngine(
     }
 
     /// <summary>
-    /// Extracts links from a fetched page, records its edges and page result, and returns the
-    /// same-domain, within-depth candidates for the next BFS wave. Mutates
-    /// <paramref name="edgeSet"/> and <paramref name="result"/>, so every caller must hold the
-    /// crawl's sync lock before calling this.
+    /// Extracts links from a fetched page, computes its Page/Edge results and the same-domain,
+    /// within-depth candidates for the next BFS wave. Pure computation over this page's own
+    /// HTML only - touches no shared crawl state, so it's safe to call from multiple concurrent
+    /// fetches without holding the crawl's sync lock.
     /// </summary>
-    private List<string> ProcessFetchedPage(
+    private PageProcessingResult ComputePageResult(
         Guid jobId,
         string currentUrl,
         int depth,
         string html,
         int maxDepth,
-        string startingHost,
-        HashSet<(string Parent, string Child)> edgeSet,
-        CrawlExecutionResult result)
+        string startingHost)
     {
         var rawLinks = _htmlLinkExtractor.ExtractLinks(html);
         var normalizedOutgoing = new List<string>(rawLinks.Count);
+        var edgeKeys = new List<(string Parent, string Child)>();
         var nextLevelCandidates = new List<string>();
 
         foreach (var rawLink in rawLinks)
@@ -197,17 +201,7 @@ public class CrawlerEngine(
             }
 
             normalizedOutgoing.Add(normalizedLink);
-
-            var edgeKey = (currentUrl, normalizedLink);
-            if (edgeSet.Add(edgeKey))
-            {
-                result.Edges.Add(new Edge
-                {
-                    JobId = jobId,
-                    ParentUrl = currentUrl,
-                    ChildUrl = normalizedLink
-                });
-            }
+            edgeKeys.Add((currentUrl, normalizedLink));
 
             if (depth < maxDepth && _urlNormalizer.IsSameDomain(normalizedLink, startingHost))
             {
@@ -216,16 +210,40 @@ public class CrawlerEngine(
         }
 
         var ratio = _ratioCalculator.Calculate(normalizedOutgoing, startingHost);
-
-        result.Pages.Add(new Page
+        var page = new Page
         {
             Id = Guid.NewGuid(),
             JobId = jobId,
             Url = currentUrl,
             DomainLinkRatio = ratio
-        });
+        };
 
-        return nextLevelCandidates;
+        return new PageProcessingResult(page, edgeKeys, nextLevelCandidates);
+    }
+
+    /// <summary>
+    /// Merges a <see cref="ComputePageResult"/> outcome into the shared crawl state
+    /// (deduplicating edges). Callers must hold the crawl's sync lock before calling this.
+    /// </summary>
+    private static void MergePageResult(
+        PageProcessingResult pageResult,
+        HashSet<(string Parent, string Child)> edgeSet,
+        CrawlExecutionResult result)
+    {
+        result.Pages.Add(pageResult.Page);
+
+        foreach (var edgeKey in pageResult.EdgeKeys)
+        {
+            if (edgeSet.Add(edgeKey))
+            {
+                result.Edges.Add(new Edge
+                {
+                    JobId = pageResult.Page.JobId,
+                    ParentUrl = edgeKey.Parent,
+                    ChildUrl = edgeKey.Child
+                });
+            }
+        }
     }
 
     private async Task<PageFetchOutcome> FetchHtmlAsync(Guid jobId, string url, CancellationToken cancellationToken)

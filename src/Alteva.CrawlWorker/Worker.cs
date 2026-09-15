@@ -75,10 +75,22 @@ public class Worker : BackgroundService
         var consumer = new AsyncEventingBasicConsumer(_channel);
         consumer.Received += async (sender, ea) =>
         {
-            // Acquire a slot before returning from the handler, so the dispatcher can move on to
-            // deliver the next message immediately while this one processes in the background -
-            // that's what actually makes jobs run concurrently rather than one at a time.
-            await jobConcurrencyLimiter.WaitAsync(stoppingToken);
+            try
+            {
+                // Acquire a slot before returning from the handler, so the dispatcher can move on
+                // to deliver the next message immediately while this one processes in the
+                // background - that's what actually makes jobs run concurrently rather than one
+                // at a time.
+                await jobConcurrencyLimiter.WaitAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // Host is shutting down while we were waiting for a slot. Return cleanly instead
+                // of throwing out of this handler, which RabbitMQ.Client would otherwise surface
+                // as a CallbackException on the connection.
+                return;
+            }
+
             _ = ProcessMessageSafelyAsync(ea, stoppingToken, jobConcurrencyLimiter);
         };
         consumer.ConsumerCancelled += OnConsumerCancelledAsync;
