@@ -477,15 +477,40 @@ public class PageCrawlHandlerTests : IDisposable
     {
         var job = await SubmitJobAsync(maxDepth: 2);
 
-        using (var scope = _services.CreateScope())
-        {
-            var failed = await CreateHandler(scope, MultiLevelSite()).FailPageAsync(RootMessage(job), "boom", CancellationToken.None);
-            failed.Should().BeTrue();
-        }
+        (await FailPageAsync(RootMessage(job))).Should().Be(FailPageOutcome.PageFailed);
 
         var (savedJob, pages, _) = await LoadAsync(job.Id);
         pages.Single().Status.Should().Be(PageStatus.Failed);
         savedJob.Status.Should().Be(JobStatus.Failed);
         savedJob.FailureReason.Should().Be("boom");
+    }
+
+    [Fact]
+    public async Task FailPage_WhenJobCancelled_ReportsJobInactive()
+    {
+        var job = await SubmitJobAsync(maxDepth: 2);
+        await CancelJobAsync(job.Id);
+
+        (await FailPageAsync(RootMessage(job))).Should().Be(FailPageOutcome.JobInactive);
+    }
+
+    [Fact]
+    public async Task FailPage_WhenPageAlreadyFinishedAndJobActive_ReportsPageAlreadyFinished()
+    {
+        // Root done with queued children: a failure now can only come from re-publishing them, which must be retried
+        var job = await SubmitJobAsync(maxDepth: 2);
+        using (var scope = _services.CreateScope())
+        {
+            await CreateHandler(scope, MultiLevelSite()).HandleAsync(RootMessage(job), CancellationToken.None);
+        }
+
+        (await FailPageAsync(RootMessage(job))).Should().Be(FailPageOutcome.PageAlreadyFinished);
+        (await LoadAsync(job.Id)).Job.Status.Should().Be(JobStatus.Running);
+    }
+
+    private async Task<FailPageOutcome> FailPageAsync(CrawlPageMessage message)
+    {
+        using var scope = _services.CreateScope();
+        return await CreateHandler(scope, MultiLevelSite()).FailPageAsync(message, "boom", CancellationToken.None);
     }
 }

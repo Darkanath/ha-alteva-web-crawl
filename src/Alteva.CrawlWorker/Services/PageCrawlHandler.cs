@@ -11,6 +11,21 @@ using Microsoft.Extensions.Logging;
 
 namespace Alteva.CrawlWorker.Services;
 
+public enum FailPageOutcome
+{
+    /// <summary>The page was committed as Failed; the message can be acked.</summary>
+    PageFailed,
+
+    /// <summary>The job is no longer active; nothing to do, the message can be acked.</summary>
+    JobInactive,
+
+    /// <summary>
+    /// The job is active but the page is already finished, so the failing work was re-publishing its
+    /// children (broker trouble). The message must be retried, or those children would never run.
+    /// </summary>
+    PageAlreadyFinished
+}
+
 /// <summary>
 /// Handles one <see cref="CrawlPageMessage"/> end to end (architecture_notes.md §3.3):
 /// gate → polite download with retries (<see cref="PageCrawler"/>) → commit → publish claimed children.
@@ -72,15 +87,21 @@ public class PageCrawlHandler
     }
 
     /// <summary>
-    /// Commits the page as <see cref="PageStatus.Failed"/> after its processing failed on redelivery.
-    /// Returns false if nothing was committed (job no longer active, or page no longer Queued).
+    /// Commits the page as <see cref="PageStatus.Failed"/> after its processing failed twice.
+    /// Throws if the database is unavailable.
     /// </summary>
-    public async Task<bool> FailPageAsync(CrawlPageMessage message, string reason, CancellationToken cancellationToken)
+    public async Task<FailPageOutcome> FailPageAsync(CrawlPageMessage message, string reason, CancellationToken cancellationToken)
     {
         var result = new PageResult(message.JobId, message.Url, message.Depth, message.MaxDepth, _maxPages,
             PageStatus.Failed, null, reason, [], []);
-        var commit = await _store.CommitPageAsync(result, cancellationToken);
-        return commit.Committed;
+        if ((await _store.CommitPageAsync(result, cancellationToken)).Committed)
+        {
+            return FailPageOutcome.PageFailed;
+        }
+
+        return await _store.IsJobActiveAsync(message.JobId, cancellationToken)
+            ? FailPageOutcome.PageAlreadyFinished
+            : FailPageOutcome.JobInactive;
     }
 
     // Returns null when the job was cancelled during a delay or download.

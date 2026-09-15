@@ -27,6 +27,12 @@ public class Worker : BackgroundService
     private IModel? _channel;
     private AsyncEventingBasicConsumer? _consumer;
     private const int MaxLoggedPayloadLength = 500;
+
+    /// <summary>
+    /// Wait before requeuing a message after a failure, so an outage (database, broker) does not
+    /// spin the single worker. Requeued messages keep their queue position.
+    /// </summary>
+    public static readonly TimeSpan FailureRequeueDelay = TimeSpan.FromSeconds(10);
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public Worker(
@@ -105,7 +111,7 @@ public class Worker : BackgroundService
         var message = TryDeserialize(ea);
         if (message == null)
         {
-            // Malformed or old-contract payload: never retryable -> dead-letter queue.
+            // Malformed or old-contract payload: the only thing that is dead-lettered.
             NackMessage(ea.DeliveryTag, requeue: false);
             return;
         }
@@ -123,37 +129,57 @@ public class Worker : BackgroundService
         }
         catch (Exception ex) when (!ea.Redelivered)
         {
-            // First failure: retry once. A requeued message keeps its position in the queue.
+            // First failure: retry once.
             _logger.LogWarning(ex, "Failed handling {Url} (job {JobId}). Requeuing for one retry.", message.Url, message.JobId);
-            NackMessage(ea.DeliveryTag, requeue: true);
+            await RequeueAfterDelayAsync(ea, stoppingToken);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed handling {Url} (job {JobId}) on redelivery. Marking the page Failed.", message.Url, message.JobId);
-            await FailPageOrDeadLetterAsync(ea, message, ex);
+            await FailPageOrRequeueAsync(ea, message, ex, stoppingToken);
         }
     }
 
-    private async Task FailPageOrDeadLetterAsync(BasicDeliverEventArgs ea, CrawlPageMessage message, Exception failure)
+    /// <summary>
+    /// Second failure: record the page as Failed so the job can finish. If even that is impossible, the
+    /// cause is infrastructure (database or broker down), not the page: requeue and try again later
+    /// rather than dead-lettering, which would leave the job Running forever.
+    /// </summary>
+    private async Task FailPageOrRequeueAsync(BasicDeliverEventArgs ea, CrawlPageMessage message, Exception failure, CancellationToken stoppingToken)
     {
         try
         {
             using var scope = _scopeFactory.CreateScope();
             var handler = scope.ServiceProvider.GetRequiredService<PageCrawlHandler>();
-            if (await handler.FailPageAsync(message, $"Processing failed after retry: {failure.Message}", CancellationToken.None))
+            var outcome = await handler.FailPageAsync(message, $"Processing failed after retry: {failure.Message}", stoppingToken);
+            if (outcome != FailPageOutcome.PageAlreadyFinished)
             {
                 AckMessage(ea.DeliveryTag);
                 return;
             }
 
-            _logger.LogError("Could not mark {Url} (job {JobId}) Failed (job inactive or page already finished). Dead-lettering.", message.Url, message.JobId);
+            _logger.LogError("Job {JobId}: {Url} is finished but re-publishing its children keeps failing. Requeuing.", message.JobId, message.Url);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Could not mark {Url} (job {JobId}) Failed. Dead-lettering.", message.Url, message.JobId);
+            _logger.LogError(ex, "Job {JobId}: Could not mark {Url} Failed (infrastructure unavailable). Requeuing.", message.JobId, message.Url);
         }
 
-        NackMessage(ea.DeliveryTag, requeue: false);
+        await RequeueAfterDelayAsync(ea, stoppingToken);
+    }
+
+    private async Task RequeueAfterDelayAsync(BasicDeliverEventArgs ea, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await Task.Delay(FailureRequeueDelay, stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down: requeue immediately.
+        }
+
+        NackMessage(ea.DeliveryTag, requeue: true);
     }
 
     private CrawlPageMessage? TryDeserialize(BasicDeliverEventArgs ea)

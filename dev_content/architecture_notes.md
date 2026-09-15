@@ -160,9 +160,12 @@ Delivery is at-least-once. Every step is safe to repeat:
 | **Transient HTTP failure:** network error, HttpClient timeout (15 s), HTTP 408, 429 or 5xx | Retried in-process, up to **3 attempts** in total. Each attempt waits the politeness delay, or the server's `Retry-After` (capped at 30 s) if longer. Still failing → page `Failed` ("… (after 3 attempts)"). Root → job `Failed`. |
 | **Permanent HTTP failure:** any other 4xx (e.g. 403, 404) | Page `Failed` at once, no retry. Root → job `Failed`. |
 | Non-HTML response | Page `Skipped`. Root → job `Completed` with a single page. |
-| Unexpected exception, first delivery | `nack` with `requeue = true` (message keeps its queue position). |
-| Unexpected exception on a **redelivered** message (`Redelivered` flag) | Page committed as `Failed` — one retry only, no retry counter. |
-| Malformed payload (bad JSON, missing fields) | `nack` with `requeue = false` → dead-letter queue. |
+| Unexpected exception (e.g. database error), first delivery | Wait **10 s**, then `nack` with `requeue = true` (message keeps its queue position). |
+| Unexpected exception on a **redelivered** message (`Redelivered` flag) | Page committed as `Failed` — one retry only, no retry counter. Ack. |
+| …and the page cannot be marked `Failed` because the database or broker is unavailable | **Not dead-lettered.** Wait 10 s and requeue, until the infrastructure is back; the page is then crawled normally. (If the job is no longer active, just ack.) |
+| Malformed payload (bad JSON, missing fields, old job-level contract) | `nack` with `requeue = false` → dead-letter queue. **The only thing that is dead-lettered.** |
+
+Infrastructure failures are deliberately retried forever rather than dead-lettered: a dead-lettered page would leave its job `Running` with a `Queued` page that nothing will ever process. While the database or broker is down, the single worker waits (10 s between attempts) and `/health` reports `Unhealthy`.
 | Worker host shutdown mid-page | `nack` with `requeue = true`; processed again after restart. |
 
 ### 3.7 Cancellation
@@ -202,7 +205,6 @@ erDiagram
         datetime StartedAt "nullable"
         datetime CompletedAt "nullable"
         string FailureReason "nullable"
-        int RetryCount "unused, dropped in Phase 5"
     }
     PAGE {
         guid Id PK
@@ -250,6 +252,8 @@ $$\text{Domain Link Ratio} = \frac{\text{\# outgoing links within the starting d
 | `WORKER_HEALTH_PORT` | 8081 | Compose | Host port for the worker's `/health` |
 | Cancellation poll interval | 1 s | Worker | In-flight page abort (code) |
 | Publisher confirm timeout | 5 s | API, Worker | Max wait for broker confirm (code) |
+| Failure requeue delay | 10 s | Worker | Wait before requeuing a message after a failure (code) |
+| Worker health check timeout | 3 s | Worker | Database check bound, so `/health` answers promptly during an outage (code) |
 | `RabbitMQ:*` topology names | `appsettings.json` | API, Worker | Exchange, queue, routing key, dead-letter names |
 
 Secrets and hosts come from `.env` (see `.env.example`); nothing is hard-coded.
@@ -283,15 +287,15 @@ frontend/
 | — | Smoke test on `docker compose` (see below) | ✅ Done |
 | 4 | Cancel via `CrawlStateStore`; 503 + `Failed` job on publish failure; progress counts; breadth-first tree (each page once, page status, no ratio for unfinished pages); string enums in JSON; frontend progress bar and page status in tree; quieter EF/HttpClient logs; `DOTNET_ENVIRONMENT` for the worker | ✅ Done |
 | — | HTTP retries for transient failures; worker `/health` (RabbitMQ consumer + database) | ✅ Done |
-| 5 | Drop the unused `Job.RetryCount` column; decide handling when the database/broker is unavailable during failure handling | Pending |
+| 5 | Dropped `Job.RetryCount` (migration `DropJobRetryCount`); infrastructure failures requeue with a 10 s delay instead of dead-lettering; `FailPageOutcome`; worker database health check bounded to 3 s | ✅ Done |
 | 6 | Tests, docs, full end-to-end verification | Pending |
 
-**Verified end to end** (`docker compose`, local fixture site): depth-2 crawl with correct depths, ratios, edges and 3–5 s sequential downloads; root 404 → job `Failed`; cancel during a hanging download aborted in ~1 s with 10 queued messages discarded in ~20 ms and pages `Skipped`; malformed and old-contract messages dead-lettered; worker killed mid-page → message redelivered and crawl completed without duplicates; broker down on create → 503 and job `Failed`; broker restart → API publisher reconnects, worker restarts via its restart policy and resumes.
+**Verified end to end** (`docker compose`, local fixture site): depth-2 crawl with correct depths, ratios, edges and 3–5 s sequential downloads; root 404 → job `Failed`; cancel during a hanging download aborted in ~1 s with 10 queued messages discarded in ~20 ms and pages `Skipped`; malformed and old-contract messages dead-lettered; worker killed mid-page → message redelivered and crawl completed without duplicates; broker down on create → 503 and job `Failed`; broker restart → API publisher reconnects, worker restarts via its restart policy and resumes; transient HTTP errors retried (503×2 → Done, 500×3 → Failed, 429 honours `Retry-After`); SQL Server stopped for ~45 s mid-crawl → the in-flight page is requeued (not failed, not dead-lettered) and the job completes with all pages `Done`, while worker `/health` returns 503 within ~3 s.
 
 **Deployment:** the old and new message contracts are incompatible — drain `alteva.crawl.jobs` before deploying Phase 3.
 
 ### Known open issues
 - **No Docker healthchecks:** API (`:8080/health`) and worker (`:8081/health`) expose health endpoints, but the ASP.NET runtime image has no `curl`/`wget`, so `docker-compose.yml` defines no container healthchecks for them.
-- **Database unavailable while handling a failure:** if a page can be neither committed nor marked `Failed`, its message is dead-lettered and the job stays `Running`. To be decided in Phase 5.
+- **Head-of-line blocking on persistent infrastructure failure:** a message whose failure is caused by a lasting infrastructure problem (or a bug that also breaks marking the page `Failed`) is retried every 10 s and blocks the single worker until fixed. Chosen over dead-lettering, which would strand the job.
 - **SSRF:** any http(s) URL is crawled, including private/internal addresses.
 - **Link handling:** hrefs are not HTML-entity-decoded, `<base href>` is ignored, redirects are followed off-domain, and `Uri.ToString()` unescapes percent-encoding.

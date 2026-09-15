@@ -63,10 +63,10 @@ Open `http://localhost:5173` in your browser.
 
 ### 2. Event-Driven Messaging (RabbitMQ)
 The system employs reliable message queuing to prevent job loss during traffic spikes or worker crashes:
-- **Dead-Letter Queues (DLQ)**: Malformed messages, and pages that cannot even be marked failed, are routed to a Dead-Letter Queue for later inspection.
+- **Dead-Letter Queue (DLQ)**: Only malformed messages (invalid JSON, missing fields, unknown contract) are dead-lettered, for later inspection.
 - **Explicit Acknowledgments**: A page message is `Ack`ed only after the page is persisted and its child messages are confirmed by the broker.
 - **HTTP retry policy**: Network errors, timeouts (15 s), HTTP 408, 429 and 5xx are **transient** and retried up to 3 attempts per page, waiting the politeness delay (or the server's `Retry-After`, up to 30 s) between attempts. Other 4xx responses are permanent and fail the page immediately.
-- **Message retry**: An unexpected processing failure (e.g. a database error) requeues the message once; a second failure marks the page failed.
+- **Message retry**: An unexpected processing failure (e.g. a database error) requeues the message after 10 s; a second failure marks the page failed. If the page cannot even be marked failed because the database or broker is down, the message keeps being requeued every 10 s until the infrastructure recovers, so no job is left stuck.
 - **Cancellation**: Cancelling a job discards its remaining messages without processing them and aborts the page in progress within about a second.
 
 ### 3. Idempotency Strategy

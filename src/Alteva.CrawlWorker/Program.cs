@@ -50,9 +50,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<Worker>());
 // ==========================================
 // Health
 // ==========================================
+// Short timeout: an unreachable database would otherwise hold /health for the full SQL connect timeout
 builder.Services.AddHealthChecks()
     .AddCheck<RabbitMqConsumerHealthCheck>("rabbitmq")
-    .AddCheck<DatabaseHealthCheck>("database");
+    .AddCheck<DatabaseHealthCheck>("database", timeout: TimeSpan.FromSeconds(3));
 
 var app = builder.Build();
 app.MapHealthChecks("/health");

@@ -21,8 +21,10 @@ public class RabbitMqConsumerHealthCheck(Worker worker) : IHealthCheck
 /// </summary>
 public class DatabaseHealthCheck(AppDbContext dbContext) : IHealthCheck
 {
+    // SqlClient resolves the server name synchronously and ignores cancellation while connecting, so run it on
+    // the thread pool and stop waiting at the health check timeout; otherwise /health hangs during an outage.
     public async Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken cancellationToken = default) =>
-        await dbContext.Database.CanConnectAsync(cancellationToken)
+        await Task.Run(() => dbContext.Database.CanConnectAsync(cancellationToken), cancellationToken).WaitAsync(cancellationToken)
             ? HealthCheckResult.Healthy("Database reachable.")
             : HealthCheckResult.Unhealthy("Database unreachable.");
 }
