@@ -13,13 +13,11 @@ namespace Alteva.CrawlWorker.Services;
 
 /// <summary>
 /// Handles one <see cref="CrawlPageMessage"/> end to end (architecture_notes.md §3.3):
-/// gate → politeness delay → download → commit → publish claimed children.
+/// gate → polite download with retries (<see cref="PageCrawler"/>) → commit → publish claimed children.
 /// Returning normally means the message can be acked.
 /// </summary>
 public class PageCrawlHandler
 {
-    public const double DefaultDelayMinSeconds = 3;
-    public const double DefaultDelayMaxSeconds = 5;
     public const int DefaultMaxPages = 200;
 
     private readonly ICrawlStateStore _store;
@@ -27,8 +25,6 @@ public class PageCrawlHandler
     private readonly IMessagePublisher _publisher;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<PageCrawlHandler> _logger;
-    private readonly TimeSpan _delayMin;
-    private readonly TimeSpan _delayMax;
     private readonly int _maxPages;
 
     public PageCrawlHandler(
@@ -44,16 +40,11 @@ public class PageCrawlHandler
         _publisher = publisher;
         _scopeFactory = scopeFactory;
         _logger = logger;
-
-        var delayMinSeconds = Math.Max(0, configuration.GetValue("CRAWLER_DELAY_MIN_SECONDS", DefaultDelayMinSeconds));
-        var delayMaxSeconds = Math.Max(delayMinSeconds, configuration.GetValue("CRAWLER_DELAY_MAX_SECONDS", DefaultDelayMaxSeconds));
-        _delayMin = TimeSpan.FromSeconds(delayMinSeconds);
-        _delayMax = TimeSpan.FromSeconds(delayMaxSeconds);
         _maxPages = configuration.GetValue("MAX_PAGES_SAFETY_LIMIT", DefaultMaxPages);
     }
 
     /// <summary>
-    /// How often the job status is polled during the delay and download to abort a cancelled job.
+    /// How often the job status is polled during delays and downloads to abort a cancelled job.
     /// </summary>
     public TimeSpan CancellationPollInterval { get; init; } = TimeSpan.FromSeconds(1);
 
@@ -70,7 +61,7 @@ public class PageCrawlHandler
                 return;
         }
 
-        var result = await DelayAndCrawlAsync(message, stoppingToken);
+        var result = await CrawlUnlessCancelledAsync(message, stoppingToken);
         if (result == null)
         {
             _logger.LogInformation("Job {JobId}: Job was cancelled while crawling {Url}. Discarding.", message.JobId, message.Url);
@@ -92,15 +83,14 @@ public class PageCrawlHandler
         return commit.Committed;
     }
 
-    // Returns null when the job was cancelled during the delay or download.
-    private async Task<PageResult?> DelayAndCrawlAsync(CrawlPageMessage message, CancellationToken stoppingToken)
+    // Returns null when the job was cancelled during a delay or download.
+    private async Task<PageResult?> CrawlUnlessCancelledAsync(CrawlPageMessage message, CancellationToken stoppingToken)
     {
         using var jobCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var watcher = CancelWhenJobInactiveAsync(message.JobId, jobCancellation);
 
         try
         {
-            await Task.Delay(NextPolitenessDelay(), jobCancellation.Token);
             return await _pageCrawler.CrawlAsync(message, _maxPages, jobCancellation.Token);
         }
         catch (OperationCanceledException) when (jobCancellation.IsCancellationRequested && !stoppingToken.IsCancellationRequested)
@@ -185,7 +175,4 @@ public class PageCrawlHandler
             MaxDepth = parent.MaxDepth,
             RootUrl = parent.RootUrl
         }, cancellationToken: cancellationToken);
-
-    private TimeSpan NextPolitenessDelay() =>
-        _delayMin + (_delayMax - _delayMin) * Random.Shared.NextDouble();
 }

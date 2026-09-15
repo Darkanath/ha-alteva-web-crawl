@@ -63,9 +63,10 @@ services:
     # is exhausted or the consumer is cancelled unrecoverably (see Worker.cs),
     # relying on the orchestrator to bring it back up with a fresh connection.
     restart: unless-stopped
+    ports:
+      - "${WORKER_HEALTH_PORT:-8081}:8080"   # GET /health (RabbitMQ consumer + database)
     environment:
-      # The worker uses the generic host, which reads DOTNET_ENVIRONMENT (not ASPNETCORE_ENVIRONMENT)
-      - DOTNET_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
       - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=${SQL_SERVER_DATABASE:-AltevaCrawlDb};User Id=${SQL_SERVER_USER:-sa};Password=${SQL_SERVER_PASSWORD};TrustServerCertificate=True;
       - RabbitMQ__Host=rabbitmq
       - RabbitMQ__Port=5672

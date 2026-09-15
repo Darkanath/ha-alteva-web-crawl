@@ -79,6 +79,9 @@ public class PageCrawlHandlerTests : IDisposable
         public HashSet<string> Hanging { get; } = new();
         public Dictionary<string, string> NonHtml { get; } = new();
 
+        /// <summary>Failures served for a URL before its real content: an HTTP status (optionally with Retry-After seconds), or null for a network error.</summary>
+        public Dictionary<string, Queue<(HttpStatusCode? Status, int? RetryAfterSeconds)>> Failures { get; } = new();
+
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var url = request.RequestUri!.ToString();
@@ -91,6 +94,21 @@ public class PageCrawlHandlerTests : IDisposable
             try
             {
                 await Task.Delay(Hanging.Contains(url) ? TimeSpan.FromSeconds(30) : TimeSpan.FromMilliseconds(5), cancellationToken);
+
+                if (Failures.TryGetValue(url, out var failures) && failures.TryDequeue(out var failure))
+                {
+                    if (failure.Status == null)
+                    {
+                        throw new HttpRequestException("Connection reset (simulated)");
+                    }
+
+                    var error = new HttpResponseMessage(failure.Status.Value);
+                    if (failure.RetryAfterSeconds is { } seconds)
+                    {
+                        error.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(seconds));
+                    }
+                    return error;
+                }
 
                 if (NonHtml.TryGetValue(url, out var mediaType))
                 {
@@ -119,10 +137,6 @@ public class PageCrawlHandlerTests : IDisposable
 
     private PageCrawlHandler CreateHandler(IServiceScope scope, FixtureSite site, double delaySeconds = 0, int maxPages = 200)
     {
-        var normalizer = new UrlNormalizer();
-        var crawler = new PageCrawler(new HttpClient(site), normalizer, new HtmlLinkExtractor(),
-            new DomainLinkRatioCalculator(normalizer), NullLogger<PageCrawler>.Instance);
-
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -131,6 +145,10 @@ public class PageCrawlHandlerTests : IDisposable
                 ["MAX_PAGES_SAFETY_LIMIT"] = maxPages.ToString(CultureInfo.InvariantCulture)
             })
             .Build();
+
+        var normalizer = new UrlNormalizer();
+        var crawler = new PageCrawler(new HttpClient(site), normalizer, new HtmlLinkExtractor(),
+            new DomainLinkRatioCalculator(normalizer), configuration, NullLogger<PageCrawler>.Instance);
 
         return new PageCrawlHandler(
             scope.ServiceProvider.GetRequiredService<ICrawlStateStore>(),
@@ -292,6 +310,80 @@ public class PageCrawlHandlerTests : IDisposable
         {
             (site.Requests[i].StartedAt - site.Requests[i - 1].StartedAt).Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(180));
         }
+    }
+
+    // ---------- HTTP retries ----------
+
+    private FixtureSite SinglePageSite(params (HttpStatusCode? Status, int? RetryAfterSeconds)[] failuresBeforeSuccess)
+    {
+        var site = new FixtureSite(new Dictionary<string, string> { [Root] = "<p>no links</p>" });
+        site.Failures[Root] = new Queue<(HttpStatusCode?, int?)>(failuresBeforeSuccess);
+        return site;
+    }
+
+    [Fact]
+    public async Task TransientHttpErrors_AreRetried_UntilSuccess()
+    {
+        var site = SinglePageSite((HttpStatusCode.ServiceUnavailable, null), (HttpStatusCode.BadGateway, null));
+        var job = await SubmitJobAsync(maxDepth: 1);
+
+        await RunWorkerAsync(site);
+
+        site.Requests.Should().HaveCount(3);
+        var (savedJob, pages, _) = await LoadAsync(job.Id);
+        pages.Single().Status.Should().Be(PageStatus.Done);
+        savedJob.Status.Should().Be(JobStatus.Completed);
+    }
+
+    [Fact]
+    public async Task NetworkError_IsRetried()
+    {
+        var site = SinglePageSite((null, null));
+        var job = await SubmitJobAsync(maxDepth: 1);
+
+        await RunWorkerAsync(site);
+
+        site.Requests.Should().HaveCount(2);
+        (await LoadAsync(job.Id)).Pages.Single().Status.Should().Be(PageStatus.Done);
+    }
+
+    [Fact]
+    public async Task PersistentTransientError_FailsPageAfterMaxAttempts()
+    {
+        var site = SinglePageSite(Enumerable.Repeat<(HttpStatusCode?, int?)>((HttpStatusCode.InternalServerError, null), 5).ToArray());
+        var job = await SubmitJobAsync(maxDepth: 1);
+
+        await RunWorkerAsync(site);
+
+        site.Requests.Should().HaveCount(PageCrawler.MaxAttempts);
+        var (savedJob, pages, _) = await LoadAsync(job.Id);
+        pages.Single().Status.Should().Be(PageStatus.Failed);
+        pages.Single().FailureReason.Should().Contain("500").And.Contain($"after {PageCrawler.MaxAttempts} attempts");
+        savedJob.Status.Should().Be(JobStatus.Failed);
+    }
+
+    [Fact]
+    public async Task PermanentHttpError_IsNotRetried()
+    {
+        var site = SinglePageSite((HttpStatusCode.Forbidden, null));
+        var job = await SubmitJobAsync(maxDepth: 1);
+
+        await RunWorkerAsync(site);
+
+        site.Requests.Should().ContainSingle();
+        (await LoadAsync(job.Id)).Pages.Single().FailureReason.Should().Be("HTTP status 403 (Forbidden).");
+    }
+
+    [Fact]
+    public async Task TooManyRequests_WaitsForRetryAfter()
+    {
+        var site = SinglePageSite((HttpStatusCode.TooManyRequests, 1));
+        await SubmitJobAsync(maxDepth: 1);
+
+        await RunWorkerAsync(site);
+
+        site.Requests.Should().HaveCount(2);
+        (site.Requests[1].StartedAt - site.Requests[0].StartedAt).Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(950));
     }
 
     // ---------- Cancellation ----------

@@ -25,6 +25,7 @@ public class Worker : BackgroundService
 
     private IConnection? _connection;
     private IModel? _channel;
+    private AsyncEventingBasicConsumer? _consumer;
     private const int MaxLoggedPayloadLength = 500;
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
@@ -39,6 +40,11 @@ public class Worker : BackgroundService
         _hostApplicationLifetime = hostApplicationLifetime ?? throw new ArgumentNullException(nameof(hostApplicationLifetime));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
+
+    /// <summary>
+    /// True while the channel is open and the consumer is registered with RabbitMQ (reported by /health).
+    /// </summary>
+    public bool IsConsuming => _channel is { IsOpen: true } && _consumer is { IsRunning: true };
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -63,6 +69,7 @@ public class Worker : BackgroundService
         var consumer = new AsyncEventingBasicConsumer(_channel);
         consumer.Received += (sender, ea) => ProcessMessageSafelyAsync(ea, stoppingToken);
         consumer.ConsumerCancelled += OnConsumerCancelledAsync;
+        _consumer = consumer;
 
         _channel.BasicConsume(
             queue: options.QueueName,

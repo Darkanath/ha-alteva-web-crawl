@@ -1,14 +1,13 @@
 using Alteva.CrawlWorker;
+using Alteva.CrawlWorker.Health;
 using Alteva.CrawlWorker.Services;
 using Alteva.Domain.Services;
 using Alteva.Infrastructure.Data;
 using Alteva.Infrastructure.Messaging;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 
-var builder = Host.CreateApplicationBuilder(args);
+// A minimal web host, only so the worker can serve /health; all crawling happens in the Worker hosted service.
+var builder = WebApplication.CreateBuilder(args);
 
 // ==========================================
 // Database Persistence & Crawl State
@@ -44,7 +43,17 @@ builder.Services.AddHttpClient<PageCrawler>(client =>
 });
 builder.Services.AddScoped<PageCrawlHandler>();
 
-builder.Services.AddHostedService<Worker>();
+// Singleton so the health check can observe the consumer
+builder.Services.AddSingleton<Worker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Worker>());
 
-var host = builder.Build();
-host.Run();
+// ==========================================
+// Health
+// ==========================================
+builder.Services.AddHealthChecks()
+    .AddCheck<RabbitMqConsumerHealthCheck>("rabbitmq")
+    .AddCheck<DatabaseHealthCheck>("database");
+
+var app = builder.Build();
+app.MapHealthChecks("/health");
+app.Run();

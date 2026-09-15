@@ -40,7 +40,7 @@ graph TD
 | **`Alteva.Domain`** | Pure domain logic and models | No infrastructure dependencies. URL normalization, `UrlHasher`, Domain Link Ratio, HTML link extraction, tree construction, `CrawlPageMessage` contract. |
 | **`Alteva.Infrastructure`** | Data access & messaging | `AppDbContext` + migrations; `ICrawlStateStore` (all crawl-state reads/writes); `RabbitMQMessagePublisher` (publisher confirms); `RabbitMQTopology` (single topology definition). |
 | **`Alteva.CrawlApi`** | Orchestrator & UI gateway | Validates requests, creates a `Pending` job with its `Queued` root page, publishes the root message, cancels/deletes jobs, serves status and tree views. Applies EF migrations on startup. |
-| **`Alteva.CrawlWorker`** | Background crawler (exactly **one** instance) | Consumes one page message at a time: gate → politeness delay → download → commit → publish children → ack. |
+| **`Alteva.CrawlWorker`** | Background crawler (exactly **one** instance) | Consumes one page message at a time: gate → polite download with HTTP retries → commit → publish children → ack. Serves `/health` (RabbitMQ consumer + database). |
 | **`frontend`** | User interface | Submits crawl requests, polls status, renders the page tree and job history. |
 
 ---
@@ -52,7 +52,7 @@ graph TD
 2. **Breadth-first by construction.** The queue is FIFO and a requeued message keeps its position, so all depth-*d* pages of a job are processed before any depth-*d+1* page. A page is therefore always first claimed at its **shortest depth** — no depth-lowering logic exists.
 3. **A page is claimed by inserting `Page(Queued)`.** The unique index `(JobId, UrlHash)` makes a URL claimable once per job. A message is published only for a page the worker has just claimed (or re-published on redelivery, see 3.4).
 4. **Same domain only.** Children are claimed only when they are on the starting host or its subdomains. All links, internal or external, are stored as edges and count toward the ratio.
-5. **Politeness.** A random delay between `CRAWLER_DELAY_MIN_SECONDS` and `CRAWLER_DELAY_MAX_SECONDS` (default 3–5 s) precedes every download.
+5. **Politeness.** A random delay between `CRAWLER_DELAY_MIN_SECONDS` and `CRAWLER_DELAY_MAX_SECONDS` (default 3–5 s) precedes every download attempt, retries included.
 6. **Page limit.** A job never has more than `MAX_PAGES_SAFETY_LIMIT` pages; claims stop at the limit (remaining links are kept as edges only).
 
 ### 3.2 Message Contract
@@ -96,9 +96,11 @@ sequenceDiagram
                 W->>DB: IsJobActive
             end
         and crawl
-            W->>W: wait 3-5 s
-            W->>S: GET url
-            S-->>W: HTML
+            loop up to 3 attempts while the failure is transient
+                W->>W: wait 3-5 s (or Retry-After, max 30 s)
+                W->>S: GET url
+                S-->>W: HTML or error
+            end
         end
         Note over W: If the job was cancelled, the wait or GET is aborted, the message is acked and dropped
         W->>DB: CommitPage (one transaction)
@@ -155,7 +157,8 @@ Delivery is at-least-once. Every step is safe to repeat:
 ### 3.6 Failures, Retry & Dead-Letter
 | Situation | Handling |
 | :--- | :--- |
-| HTTP error status, network error, HttpClient timeout (15 s) | Page `Failed` (permanent, no retry). Root → job `Failed`. |
+| **Transient HTTP failure:** network error, HttpClient timeout (15 s), HTTP 408, 429 or 5xx | Retried in-process, up to **3 attempts** in total. Each attempt waits the politeness delay, or the server's `Retry-After` (capped at 30 s) if longer. Still failing → page `Failed` ("… (after 3 attempts)"). Root → job `Failed`. |
+| **Permanent HTTP failure:** any other 4xx (e.g. 403, 404) | Page `Failed` at once, no retry. Root → job `Failed`. |
 | Non-HTML response | Page `Skipped`. Root → job `Completed` with a single page. |
 | Unexpected exception, first delivery | `nack` with `requeue = true` (message keeps its queue position). |
 | Unexpected exception on a **redelivered** message (`Redelivered` flag) | Page committed as `Failed` — one retry only, no retry counter. |
@@ -242,7 +245,9 @@ $$\text{Domain Link Ratio} = \frac{\text{\# outgoing links within the starting d
 | :--- | :--- | :--- | :--- |
 | `MAX_PAGES_SAFETY_LIMIT` | 200 | Worker | Maximum pages per job |
 | `CRAWLER_DELAY_MIN_SECONDS` / `CRAWLER_DELAY_MAX_SECONDS` | 3 / 5 | Worker | Random politeness delay before each download |
-| HttpClient timeout | 15 s | Worker | Per-download timeout (code) |
+| HttpClient timeout | 15 s | Worker | Per-download-attempt timeout (code) |
+| HTTP attempts | 3 | Worker | Max attempts per page for transient failures; `Retry-After` honoured up to 30 s (code) |
+| `WORKER_HEALTH_PORT` | 8081 | Compose | Host port for the worker's `/health` |
 | Cancellation poll interval | 1 s | Worker | In-flight page abort (code) |
 | Publisher confirm timeout | 5 s | API, Worker | Max wait for broker confirm (code) |
 | `RabbitMQ:*` topology names | `appsettings.json` | API, Worker | Exchange, queue, routing key, dead-letter names |
@@ -259,7 +264,7 @@ Unit and integration tests run in isolation — no network, no Docker. Persisten
 tests/
 ├── Alteva.Domain.UnitTests/         # 42 tests: UrlNormalizer, UrlHasher, DomainLinkRatio, JobTreeBuilder (each page once, dense sites stay linear)
 ├── Alteva.Infrastructure.Tests/     # 18 tests: CrawlStateStore flow, cancel & fail, unique indexes, message serialization (SQLite)
-├── Alteva.CrawlWorker.Tests/        # 14 tests: recursive crawl over a fake FIFO queue, depth/page limits, politeness delay, cancellation (queued, during delay, during download), redelivery, link extraction
+├── Alteva.CrawlWorker.Tests/        # 22 tests: recursive crawl over a fake FIFO queue, depth/page limits, politeness delay, HTTP retries (5xx, network error, 429 Retry-After, no retry on 4xx), cancellation (queued, during delay, during download), redelivery, health checks, link extraction
 └── Alteva.CrawlApi.Tests/           # 19 tests: request validation, create (incl. 503 on publish failure), progress, tree, cancel
 frontend/
 └── src/utils/crawlerUtils.test.ts   # 9 tests: Vitest ratio formatting and status badges
@@ -277,6 +282,7 @@ frontend/
 | 3 | `PageCrawlHandler` + `PageCrawler` (gate, cancellable delay/download, commit, publish); `Worker` ack/nack incl. one-retry rule and dead-lettering; API creates job with root page and publishes `CrawlPageMessage`; removed `CrawlerEngine`, `RetryTracker`, `CrawlJobRequestedMessage` | ✅ Done |
 | — | Smoke test on `docker compose` (see below) | ✅ Done |
 | 4 | Cancel via `CrawlStateStore`; 503 + `Failed` job on publish failure; progress counts; breadth-first tree (each page once, page status, no ratio for unfinished pages); string enums in JSON; frontend progress bar and page status in tree; quieter EF/HttpClient logs; `DOTNET_ENVIRONMENT` for the worker | ✅ Done |
+| — | HTTP retries for transient failures; worker `/health` (RabbitMQ consumer + database) | ✅ Done |
 | 5 | Drop the unused `Job.RetryCount` column; decide handling when the database/broker is unavailable during failure handling | Pending |
 | 6 | Tests, docs, full end-to-end verification | Pending |
 
@@ -285,8 +291,7 @@ frontend/
 **Deployment:** the old and new message contracts are incompatible — drain `alteva.crawl.jobs` before deploying Phase 3.
 
 ### Known open issues
-- **No HTTP retry:** the requirements ask for "timeouts and retries for HTTP". Timeouts exist (15 s), but an HTTP error or network failure marks the page `Failed` immediately; only unexpected exceptions are retried (once).
-- **No worker health endpoint:** the requirements ask for health endpoints for API and worker; only the API has `/health`.
+- **No Docker healthchecks:** API (`:8080/health`) and worker (`:8081/health`) expose health endpoints, but the ASP.NET runtime image has no `curl`/`wget`, so `docker-compose.yml` defines no container healthchecks for them.
 - **Database unavailable while handling a failure:** if a page can be neither committed nor marked `Failed`, its message is dead-lettered and the job stays `Running`. To be decided in Phase 5.
 - **SSRF:** any http(s) URL is crawled, including private/internal addresses.
 - **Link handling:** hrefs are not HTML-entity-decoded, `<base href>` is ignored, redirects are followed off-domain, and `Uri.ToString()` unescapes percent-encoding.

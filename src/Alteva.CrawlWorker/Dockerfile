@@ -1,6 +1,7 @@
-# Use the official .NET runtime as a parent image
-FROM mcr.microsoft.com/dotnet/runtime:8.0 AS base
+# ASP.NET Core runtime: the worker serves /health on port 8080
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 WORKDIR /app
+EXPOSE 8080
 
 # Use the SDK image for building the application
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build

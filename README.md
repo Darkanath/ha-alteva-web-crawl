@@ -49,6 +49,10 @@ npm run dev
 ```
 Open `http://localhost:5173` in your browser.
 
+### 4. Health Endpoints
+- API: `http://localhost:8080/health`
+- Worker: `http://localhost:8081/health` — `Healthy` only while it is consuming from RabbitMQ and can reach the database (503 otherwise).
+
 ---
 
 ## Architectural Decisions & Patterns
@@ -60,7 +64,9 @@ Open `http://localhost:5173` in your browser.
 ### 2. Event-Driven Messaging (RabbitMQ)
 The system employs reliable message queuing to prevent job loss during traffic spikes or worker crashes:
 - **Dead-Letter Queues (DLQ)**: Malformed messages, and pages that cannot even be marked failed, are routed to a Dead-Letter Queue for later inspection.
-- **Explicit Acknowledgments & one retry**: A page message is `Ack`ed only after the page is persisted and its child messages are confirmed by the broker. An unexpected failure is retried once; a second failure marks the page failed.
+- **Explicit Acknowledgments**: A page message is `Ack`ed only after the page is persisted and its child messages are confirmed by the broker.
+- **HTTP retry policy**: Network errors, timeouts (15 s), HTTP 408, 429 and 5xx are **transient** and retried up to 3 attempts per page, waiting the politeness delay (or the server's `Retry-After`, up to 30 s) between attempts. Other 4xx responses are permanent and fail the page immediately.
+- **Message retry**: An unexpected processing failure (e.g. a database error) requeues the message once; a second failure marks the page failed.
 - **Cancellation**: Cancelling a job discards its remaining messages without processing them and aborts the page in progress within about a second.
 
 ### 3. Idempotency Strategy
