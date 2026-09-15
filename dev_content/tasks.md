@@ -83,15 +83,15 @@
 - [x] **Task 5.1: Setup & Utilities**
   - [x] Install and configure Vitest test runner.
   - [x] Implement ratio formatting and status badge utility functions.
-- [ ] **Task 5.2: API Service Layer**
-  - [ ] Implement typed HTTP client for Crawl API (`startJob`, `getJobDetails`, `getJobHistory`).
-- [ ] **Task 5.3: Core UI Screens**
-  - [ ] **Start Crawl Screen**: Form with URL input, max depth selector, and error handling.
-  - [ ] **Job Details Screen**: Status badge, timestamps, polling progress, and recursive interactive tree view.
-  - [ ] **History Screen**: Paginated list/table of past crawls with status chips.
-- [ ] **Task 5.4: Styling & UX Polish**
-  - [ ] Clean navigation between views.
-  - [ ] Loading spinners and friendly error banners.
+- [x] **Task 5.2: API Service Layer**
+  - [x] Implement typed HTTP client for Crawl API (`startJob`, `getJobDetails`, `getJobHistory`).
+- [x] **Task 5.3: Core UI Screens**
+  - [x] **Start Crawl Screen**: Form with URL input, max depth selector, and error handling.
+  - [x] **Job Details Screen**: Status badge, timestamps, polling progress, and recursive interactive tree view.
+  - [x] **History Screen**: Paginated list/table of past crawls with status chips.
+- [x] **Task 5.4: Styling & UX Polish**
+  - [x] Clean navigation between views.
+  - [x] Loading spinners and friendly error banners.
 
 ---
 

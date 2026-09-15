@@ -67,7 +67,7 @@ gantt
 ---
 
 ## Milestone 4: Frontend UI (React + Vite)
-- **Status:** Planned
+- **Status:** Complete (100%)
 - **Target:** Interactive, responsive single-page application demonstrating the three core user workflows.
 - **Key Deliverables:**
   - **Start Crawl Screen**: URL input, optional depth selector, validation, submit action navigating to Job Details.
