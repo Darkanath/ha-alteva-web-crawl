@@ -25,24 +25,21 @@ public class Worker : BackgroundService
     private readonly IOptions<RabbitMQOptions> _rabbitOptions;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
-    private readonly IHostApplicationLifetime _hostApplicationLifetime;
     private readonly ILogger<Worker> _logger;
 
     private IConnection? _connection;
     private IModel? _channel;
-    private const int MaxLoggedPayloadLength = 500;
+    private const int MaxRetryAttempts = 3;
 
     public Worker(
         IOptions<RabbitMQOptions> rabbitOptions,
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
-        IHostApplicationLifetime hostApplicationLifetime,
         ILogger<Worker> logger)
     {
         _rabbitOptions = rabbitOptions ?? throw new ArgumentNullException(nameof(rabbitOptions));
         _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-        _hostApplicationLifetime = hostApplicationLifetime ?? throw new ArgumentNullException(nameof(hostApplicationLifetime));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -71,7 +68,6 @@ public class Worker : BackgroundService
         {
             await ProcessMessageAsync(ea, stoppingToken);
         };
-        consumer.ConsumerCancelled += OnConsumerCancelledAsync;
 
         _channel.BasicConsume(
             queue: options.QueueName,
@@ -92,28 +88,20 @@ public class Worker : BackgroundService
     {
         var deliveryTag = ea.DeliveryTag;
         string rawJson = string.Empty;
-        CrawlJobRequestedMessage? message = null;
 
         try
         {
             rawJson = Encoding.UTF8.GetString(ea.Body.ToArray());
             _logger.LogInformation("Received crawl job message. DeliveryTag={DeliveryTag}, Length={Length}", deliveryTag, rawJson.Length);
 
-            message = JsonSerializer.Deserialize<CrawlJobRequestedMessage>(rawJson, new JsonSerializerOptions
+            var message = JsonSerializer.Deserialize<CrawlJobRequestedMessage>(rawJson, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });
 
             if (message == null || message.JobId == Guid.Empty || string.IsNullOrWhiteSpace(message.InputUrl))
             {
-                _logger.LogWarning("Poison message detected (invalid payload). Routing directly to DLQ. Raw: {RawJson}", TruncatePayloadForLogging(rawJson));
-
-                // A JobId lets us record the failure even though the payload is otherwise unusable
-                if (message != null && message.JobId != Guid.Empty)
-                {
-                    await MarkJobFailedAsync(message.JobId, "Message payload failed validation (missing or invalid InputUrl).");
-                }
-
+                _logger.LogWarning("Poison message detected (invalid payload). Routing directly to DLQ. Raw: {RawJson}", rawJson);
                 // Reject without requeue -> routes to Dead Letter Queue
                 _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
                 return;
@@ -138,16 +126,7 @@ public class Worker : BackgroundService
                 return;
             }
 
-            // Reset the retry counter only for a genuinely fresh dispatch (Pending, or a
-            // re-run after a prior terminal state). A redelivery of a message that is
-            // already Running belongs to the SAME retry sequence started above, so the
-            // counter must be left alone here or every requeued redelivery would wipe
-            // it back to 0 and the retry limit could never be reached.
-            if (job.Status != JobStatus.Running)
-            {
-                job.RetryCount = 0;
-            }
-
+            // Transition Job to Running
             job.Status = JobStatus.Running;
             job.StartedAt = DateTime.UtcNow;
             await dbContext.SaveChangesAsync(stoppingToken);
@@ -209,126 +188,39 @@ public class Worker : BackgroundService
             _logger.LogWarning("Execution canceled for delivery {DeliveryTag}. Requeuing message.", deliveryTag);
             _channel?.BasicNack(deliveryTag, multiple: false, requeue: true);
         }
-        catch (JsonException ex)
-        {
-            _logger.LogWarning(ex, "Poison message detected (malformed JSON). Routing directly to DLQ. DeliveryTag={DeliveryTag}, Raw: {RawJson}",
-                deliveryTag, TruncatePayloadForLogging(rawJson));
-
-            // No JobId can be recovered from unparseable JSON, so there is no Job row to mark Failed here.
-            // Malformed JSON is not a transient failure; reject without requeue -> routes to Dead Letter Queue
-            _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
-        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unhandled exception processing delivery {DeliveryTag}.", deliveryTag);
 
-            if (message == null || message.JobId == Guid.Empty)
+            var retryCount = GetRetryCount(ea.BasicProperties);
+            if (retryCount >= MaxRetryAttempts)
             {
-                // Can't identify which Job this delivery belongs to, so there is no
-                // row to track a retry count on. Route straight to DLQ rather than
-                // requeueing a message we can never make progress on.
-                _logger.LogError("Delivery {DeliveryTag} could not be attributed to a Job. Routing to DLQ.", deliveryTag);
-                _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
-                return;
-            }
-
-            // The primary queue is a classic queue, so RabbitMQ never populates the
-            // x-delivery-count header on redelivery. Track attempts on the Job row
-            // itself instead so the retry budget survives across redeliveries.
-            using var retryScope = _scopeFactory.CreateScope();
-            var retryTracker = retryScope.ServiceProvider.GetRequiredService<IRetryTracker>();
-            var retryCount = await retryTracker.RegisterFailureAsync(message.JobId, stoppingToken);
-
-            if (retryTracker.IsExhausted(retryCount))
-            {
-                _logger.LogError("Job {JobId} delivery {DeliveryTag} exceeded max retry attempts ({MaxRetryAttempts}). Routing to DLQ.",
-                    message.JobId, deliveryTag, retryTracker.MaxRetryAttempts);
-
-                await MarkJobFailedAsync(message.JobId,
-                    $"Exceeded max retry attempts ({retryTracker.MaxRetryAttempts}) after repeated transient failures: {ex.Message}");
+                _logger.LogError("Job delivery {DeliveryTag} exceeded max retry attempts ({MaxRetryAttempts}). Routing to DLQ.",
+                    deliveryTag, MaxRetryAttempts);
 
                 // Reject with requeue=false so RabbitMQ routes to Dead Letter Queue
                 _channel?.BasicNack(deliveryTag, multiple: false, requeue: false);
             }
             else
             {
-                _logger.LogWarning("Job {JobId} delivery {DeliveryTag} encountered transient failure (attempt {Attempt}/{MaxAttempts}). Requeuing.",
-                    message.JobId, deliveryTag, retryCount, retryTracker.MaxRetryAttempts);
+                _logger.LogWarning("Job delivery {DeliveryTag} encountered transient failure (attempt {Attempt}/{MaxAttempts}). Requeuing.",
+                    deliveryTag, retryCount + 1, MaxRetryAttempts);
 
                 // Increment retry delay before requeue
-                await Task.Delay(TimeSpan.FromSeconds(2 * retryCount), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(2 * (retryCount + 1)), stoppingToken);
                 _channel?.BasicNack(deliveryTag, multiple: false, requeue: true);
             }
         }
     }
 
-    private Task OnConsumerCancelledAsync(object sender, ConsumerEventArgs e)
+    private static int GetRetryCount(IBasicProperties? properties)
     {
-        _logger.LogError(
-            "RabbitMQ consumer was cancelled unexpectedly (ConsumerTags={ConsumerTags}). This usually indicates an unrecoverable topology change (e.g. the queue was deleted). Stopping the worker host so the container can be restarted.",
-            string.Join(",", e.ConsumerTags));
-
-        _hostApplicationLifetime.StopApplication();
-        return Task.CompletedTask;
-    }
-
-    private void OnConnectionShutdown(object? sender, ShutdownEventArgs e)
-    {
-        if (e.Initiator == ShutdownInitiator.Application)
+        if (properties?.Headers != null && properties.Headers.TryGetValue("x-delivery-count", out var countObj))
         {
-            _logger.LogInformation("RabbitMQ connection closed (ReplyCode={ReplyCode}, ReplyText={ReplyText}).", e.ReplyCode, e.ReplyText);
-            return;
+            if (countObj is long l) return (int)l;
+            if (countObj is int i) return i;
         }
-
-        _logger.LogWarning(
-            "RabbitMQ connection was lost unexpectedly (Initiator={Initiator}, ReplyCode={ReplyCode}, ReplyText={ReplyText}). Automatic recovery will attempt to reconnect.",
-            e.Initiator, e.ReplyCode, e.ReplyText);
-    }
-
-    private void OnConnectionRecoverySucceeded(object? sender, EventArgs e)
-    {
-        _logger.LogInformation("RabbitMQ connection automatically recovered successfully.");
-    }
-
-    private void OnConnectionRecoveryError(object? sender, ConnectionRecoveryErrorEventArgs e)
-    {
-        _logger.LogError(e.Exception, "RabbitMQ automatic recovery failed after exhausting retry attempts. Stopping the worker host so the container can be restarted.");
-        _hostApplicationLifetime.StopApplication();
-    }
-
-    private async Task MarkJobFailedAsync(Guid jobId, string failureReason)
-    {
-        try
-        {
-            // Use a fresh scope/DbContext (not the one active when the failure occurred) so this
-            // still succeeds when the original failure was itself a database error, and use
-            // CancellationToken.None so the failure is recorded even if the host is shutting down.
-            using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-            var job = await dbContext.Jobs.FirstOrDefaultAsync(j => j.Id == jobId, CancellationToken.None);
-            if (job == null)
-            {
-                return;
-            }
-
-            job.Status = JobStatus.Failed;
-            job.CompletedAt = DateTime.UtcNow;
-            job.FailureReason = failureReason;
-
-            await dbContext.SaveChangesAsync(CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to mark Job {JobId} as Failed after dead-lettering.", jobId);
-        }
-    }
-
-    private static string TruncatePayloadForLogging(string payload)
-    {
-        return payload.Length > MaxLoggedPayloadLength
-            ? string.Concat(payload.AsSpan(0, MaxLoggedPayloadLength), "... [truncated]")
-            : payload;
+        return 0;
     }
 
     private void DeclareTopology(IModel channel, RabbitMQOptions options)
@@ -386,9 +278,7 @@ public class Worker : BackgroundService
             Port = options.Port,
             UserName = options.Username,
             Password = options.Password,
-            DispatchConsumersAsync = true,
-            AutomaticRecoveryEnabled = true,
-            TopologyRecoveryEnabled = true
+            DispatchConsumersAsync = true
         };
 
         const int maxAttempts = 10;
@@ -402,13 +292,6 @@ public class Worker : BackgroundService
                     options.Host, options.Port, attempt, maxAttempts);
 
                 _connection = factory.CreateConnection("alteva-crawl-worker");
-                _connection.ConnectionShutdown += OnConnectionShutdown;
-                if (_connection is IAutorecoveringConnection recoverableConnection)
-                {
-                    recoverableConnection.RecoverySucceeded += OnConnectionRecoverySucceeded;
-                    recoverableConnection.ConnectionRecoveryError += OnConnectionRecoveryError;
-                }
-
                 _channel = _connection.CreateModel();
                 _logger.LogInformation("Successfully connected to RabbitMQ.");
                 return;
