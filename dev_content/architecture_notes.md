@@ -65,11 +65,12 @@ graph TD
   "jobId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "url": "https://example.com/docs",
   "depth": 1,
-  "maxDepth": 2
+  "maxDepth": 2,
+  "rootUrl": "https://example.com/"
 }
 ```
 
-`url` is the normalized URL and equals `Pages.Url`.
+`url` is the normalized URL and equals `Pages.Url`. `maxDepth` and `rootUrl` (whose host defines "same domain") are copied from the job into every message, so the worker never reloads the job. Invalid messages (missing fields, `depth` outside `0..maxDepth`, or the old job-level contract) are dead-lettered.
 
 ### 3.3 Per-Page Flow
 
@@ -81,7 +82,7 @@ sequenceDiagram
     participant DB as SQL Server
     participant S as Target site
 
-    Q->>W: CrawlPageMessage (jobId, url, depth, maxDepth)
+    Q->>W: CrawlPageMessage (jobId, url, depth, maxDepth, rootUrl)
     W->>DB: GetPageGate
     alt Discard - job not Pending/Running, or page unknown
         W->>Q: ack and drop
@@ -191,7 +192,7 @@ erDiagram
         datetime StartedAt "nullable"
         datetime CompletedAt "nullable"
         string FailureReason "nullable"
-        int RetryCount "legacy, removed in Phase 5"
+        int RetryCount "unused, dropped in Phase 5"
     }
     PAGE {
         guid Id PK
@@ -250,8 +251,8 @@ Unit and integration tests run in isolation — no network, no Docker. Persisten
 ```
 tests/
 ├── Alteva.Domain.UnitTests/         # 39 tests: UrlNormalizer, UrlHasher, DomainLinkRatio, JobTreeBuilder
-├── Alteva.Infrastructure.Tests/     # 18 tests: CrawlStateStore flow & cancellation, unique indexes, message serialization (SQLite)
-├── Alteva.CrawlWorker.Tests/        # 14 tests: HTML fixtures, sequential download, politeness delay, retry tracker
+├── Alteva.Infrastructure.Tests/     # 17 tests: CrawlStateStore flow & cancellation, unique indexes, message serialization (SQLite)
+├── Alteva.CrawlWorker.Tests/        # 14 tests: recursive crawl over a fake FIFO queue, depth/page limits, politeness delay, cancellation (queued, during delay, during download), redelivery, link extraction
 └── Alteva.CrawlApi.Tests/           # 18 tests: request validation, controller behaviour
 frontend/
 └── src/utils/crawlerUtils.test.ts   # 9 tests: Vitest ratio formatting and status badges
@@ -266,12 +267,14 @@ frontend/
 | 1 | `CrawlPageMessage`, `PageStatus`, page crawl state, `UrlHash`, migration `AddPageCrawlState` | ✅ Done |
 | — | Sequential crawling with politeness delay (no semaphores/parallelism) | ✅ Done |
 | 2 | `ICrawlStateStore`, publisher confirms, shared `RabbitMQTopology` | ✅ Done |
-| 3 | Per-page worker handler (gate, cancellable delay/download, commit, publish, ack); API publishes `CrawlPageMessage`; remove `CrawlerEngine` BFS loop | ⏳ Next |
-| 4 | API create/cancel via `CrawlStateStore`, progress in job details, tree built breadth-first with a global visited set | Pending |
-| 5 | Redelivery retry rule, dead-letter handling, remove `Job.RetryCount` / `RetryTracker` | Pending |
+| 3 | `PageCrawlHandler` + `PageCrawler` (gate, cancellable delay/download, commit, publish); `Worker` ack/nack incl. one-retry rule and dead-lettering; API creates job with root page and publishes `CrawlPageMessage`; removed `CrawlerEngine`, `RetryTracker`, `CrawlJobRequestedMessage` | ✅ Done |
+| 4 | API cancel via `CrawlStateStore`, publish-failure handling on create, progress in job details, tree built breadth-first with a global visited set | ⏳ Next |
+| 5 | Drop the unused `Job.RetryCount` column; decide handling when the database/broker is unavailable during failure handling | Pending |
 | 6 | Tests, docs, end-to-end `docker compose` verification | Pending |
 
-**Until Phase 3 lands**, the running code still uses the previous model: one `CrawlJobRequestedMessage` per job, crawled breadth-first in memory by `CrawlerEngine` (sequentially, with the politeness delay).
+**Not yet exercised against real infrastructure:** `Worker` ack/nack paths, publisher confirms, and `CrawlStateStore` on SQL Server are covered only by SQLite/fake-queue tests until the Phase 6 end-to-end run.
+
+**Until Phase 4:** job cancel in the API still sets the job status directly (its `Queued` pages are not marked `Skipped`, but their messages are still discarded at the gate), and a failed root publish leaves the job `Pending`.
 
 **Deployment:** the old and new message contracts are incompatible — drain `alteva.crawl.jobs` before deploying Phase 3.
 

@@ -61,6 +61,7 @@ public class JobsControllerTests : IDisposable
 
         _controller = new JobsController(
             _dbContext,
+            new CrawlStateStore(_dbContext),
             _publisher,
             _urlNormalizer,
             _treeBuilder,
@@ -99,12 +100,19 @@ public class JobsControllerTests : IDisposable
         savedJob.MaxDepth.Should().Be(3);
         savedJob.Status.Should().Be(JobStatus.Pending);
 
-        // Verify message published
+        var rootPage = await _dbContext.Pages.SingleAsync(p => p.JobId == response.JobId);
+        rootPage.Url.Should().Be("https://example.com/");
+        rootPage.Depth.Should().Be(0);
+        rootPage.Status.Should().Be(PageStatus.Queued);
+
+        // Verify the root page message was published
         _publisher.PublishedMessages.Should().HaveCount(1);
-        var message = _publisher.PublishedMessages[0] as CrawlJobRequestedMessage;
+        var message = _publisher.PublishedMessages[0] as CrawlPageMessage;
         message.Should().NotBeNull();
         message!.JobId.Should().Be(response.JobId);
-        message.InputUrl.Should().Be("https://example.com/");
+        message.Url.Should().Be("https://example.com/");
+        message.RootUrl.Should().Be("https://example.com/");
+        message.Depth.Should().Be(0);
         message.MaxDepth.Should().Be(3);
     }
 

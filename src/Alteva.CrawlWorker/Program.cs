@@ -11,7 +11,7 @@ using Microsoft.Extensions.Hosting;
 var builder = Host.CreateApplicationBuilder(args);
 
 // ==========================================
-// Database Persistence
+// Database Persistence & Crawl State
 // ==========================================
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
@@ -19,11 +19,13 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         ?? throw new InvalidOperationException("Connection string 'DefaultConnection' was not found in configuration or environment.");
     options.UseSqlServer(connectionString);
 });
+builder.Services.AddScoped<ICrawlStateStore, CrawlStateStore>();
 
 // ==========================================
-// Messaging & Broker Options
+// Messaging (consumer in Worker, publisher for claimed children)
 // ==========================================
 builder.Services.Configure<RabbitMQOptions>(builder.Configuration.GetSection(RabbitMQOptions.SectionName));
+builder.Services.AddSingleton<IMessagePublisher, RabbitMQMessagePublisher>();
 
 // ==========================================
 // Domain Services
@@ -33,22 +35,15 @@ builder.Services.AddSingleton<IHtmlLinkExtractor, HtmlLinkExtractor>();
 builder.Services.AddSingleton<IDomainLinkRatioCalculator, DomainLinkRatioCalculator>();
 
 // ==========================================
-// Crawler Engine & HTTP Client
+// Page Crawling
 // ==========================================
-builder.Services.AddHttpClient<ICrawlerEngine, CrawlerEngine>(client =>
+builder.Services.AddHttpClient<PageCrawler>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(15);
     client.DefaultRequestHeaders.UserAgent.ParseAdd("AltevaWebCrawler/1.0 (+https://github.com/Darkanath/ha-alteva-web-crawl)");
 });
+builder.Services.AddScoped<PageCrawlHandler>();
 
-// ==========================================
-// Retry Tracking (per-Job retry count, since classic queues don't set x-delivery-count)
-// ==========================================
-builder.Services.AddScoped<IRetryTracker, RetryTracker>();
-
-// ==========================================
-// Background Worker Hosted Service
-// ==========================================
 builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();

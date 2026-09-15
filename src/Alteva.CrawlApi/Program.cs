@@ -16,6 +16,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         ?? throw new InvalidOperationException("Connection string 'DefaultConnection' was not found in configuration or environment.");
     options.UseSqlServer(connectionString);
 });
+builder.Services.AddScoped<ICrawlStateStore, CrawlStateStore>();
 
 // RabbitMQ Options & Messaging Publisher
 builder.Services.Configure<RabbitMQOptions>(builder.Configuration.GetSection(RabbitMQOptions.SectionName));

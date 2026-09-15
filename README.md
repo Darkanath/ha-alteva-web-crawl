@@ -13,8 +13,8 @@ The system leverages a decoupled architecture, separating the API orchestration 
 - **Containerization**: Docker & Docker Compose
 
 ### System Components
-1. **Crawl API (`Alteva.CrawlApi`)**: A RESTful API that accepts crawl requests, persists initial jobs to the database, and publishes a `CrawlJobRequestedMessage` to RabbitMQ. It also serves job history, job details, and hierarchical crawl tree results to the frontend.
-2. **Crawl Worker (`Alteva.CrawlWorker`)**: A background service that consumes messages from RabbitMQ. It processes one message at a time and uses a sequential `CrawlerEngine` to perform BFS (Breadth-First Search) across pages, extract links, compute domain ratios, and update job/page/edge entities in the database.
+1. **Crawl API (`Alteva.CrawlApi`)**: A RESTful API that accepts crawl requests, persists each new job with its root page, and publishes a `CrawlPageMessage` for the root page to RabbitMQ. It also serves job history, job details, and hierarchical crawl tree results to the frontend.
+2. **Crawl Worker (`Alteva.CrawlWorker`)**: A background service that consumes messages from RabbitMQ. Each message is one page: the worker downloads it, extracts links, computes the domain ratio, persists the page and its edges, and publishes one message per newly discovered same-domain link until the job's maximum depth is reached. It processes one message at a time, so the FIFO queue yields a breadth-first crawl.
 3. **Frontend SPA (`frontend`)**: A modern React interface providing real-time status updates, a paginated job history, and an interactive recursive tree view for inspecting the final assembled crawl topology.
 
 ---
@@ -59,8 +59,9 @@ Open `http://localhost:5173` in your browser.
 
 ### 2. Event-Driven Messaging (RabbitMQ)
 The system employs reliable message queuing to prevent job loss during traffic spikes or worker crashes:
-- **Dead-Letter Queues (DLQ)**: Poison messages or jobs that exhaust their retry attempts (e.g., due to transient network failures) are safely routed to a Dead-Letter Queue for later inspection, instead of crashing the system.
-- **Explicit Acknowledgments**: Messages are only `Ack`ed when the entire crawl (or an unrecoverable failure) is safely persisted to the database.
+- **Dead-Letter Queues (DLQ)**: Malformed messages, and pages that cannot even be marked failed, are routed to a Dead-Letter Queue for later inspection.
+- **Explicit Acknowledgments & one retry**: A page message is `Ack`ed only after the page is persisted and its child messages are confirmed by the broker. An unexpected failure is retried once; a second failure marks the page failed.
+- **Cancellation**: Cancelling a job discards its remaining messages without processing them and aborts the page in progress within about a second.
 
 ### 3. Idempotency Strategy
 Idempotency and duplicate suppression are enforced strictly at the database layer using EF Core:
@@ -81,12 +82,12 @@ Domain Link Ratio = (# of outgoing links to the SAME domain) / (Total valid outg
 
 ## Trade-offs & Future Improvements
 
-1. **In-Memory URL Tracking vs. Distributed Cache**
-   - *Trade-off*: Currently, the BFS crawler uses an in-memory `HashSet<string>` to track visited URLs per job. For crawls with massive `MaxDepth` (e.g., millions of pages), this could cause memory pressure on the worker.
-   - *Improvement*: For large-scale distributed crawling, shift the visited-URL bloom filter / set to Redis.
+1. **Visited-URL Tracking & Throughput**
+   - *Trade-off*: Visited URLs are tracked in SQL Server (`Pages` unique on `(JobId, UrlHash)`), and a single worker processes pages sequentially. Simple and consistent, but throughput is bounded by one download every few seconds.
+   - *Improvement*: For large-scale crawling, allow multiple workers with per-domain rate limiting and move the visited set to a faster store (e.g. Redis).
 2. **Rate Limiting (Politeness)**
    - *Trade-off*: Downloads are sequential with a fixed randomized delay, regardless of what the target site allows.
    - *Improvement*: Respect `robots.txt` (`Crawl-delay`) and back off on HTTP 429 / `Retry-After`.
 3. **Database Write Performance**
-   - *Trade-off*: Pages and edges are assembled in memory and persisted when the job concludes, using EF Core `SaveChangesAsync`.
-   - *Improvement*: For massive topologies, implement chunked/bulk inserts using `SqlBulkCopy` instead of tracking thousands of entities in the EF Core `DbContext` state manager.
+   - *Trade-off*: Each page and its edges are persisted in one small EF Core transaction as the page is crawled.
+   - *Improvement*: For pages with very many links, use bulk inserts (`SqlBulkCopy`) for edges.

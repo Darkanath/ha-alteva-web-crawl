@@ -4,7 +4,7 @@ namespace Alteva.Domain.Models;
 
 /// <summary>
 /// Message requesting that a single page of a crawl job be fetched and expanded.
-/// The API publishes the root page at depth 0; workers publish one message per newly
+/// The API publishes the root page at depth 0; the worker publishes one message per newly
 /// claimed same-domain child at <c>Depth + 1</c> until <see cref="MaxDepth"/> is reached.
 /// </summary>
 public class CrawlPageMessage
@@ -17,13 +17,17 @@ public class CrawlPageMessage
     public string Url { get; set; } = string.Empty;
 
     /// <summary>
-    /// Link distance from the root at the time this message was published. A message whose
-    /// depth is greater than the page's current depth is stale and is dropped.
+    /// Link distance from the root (root = 0).
     /// </summary>
     public int Depth { get; set; }
 
     /// <summary>
-    /// The job's maximum depth, carried so workers need not reload the job to decide on fan-out.
+    /// The job's maximum depth, carried so the worker need not reload the job.
     /// </summary>
     public int MaxDepth { get; set; }
+
+    /// <summary>
+    /// The job's normalized root URL; its host defines "same domain" for child claims and the ratio.
+    /// </summary>
+    public string RootUrl { get; set; } = string.Empty;
 }

@@ -12,29 +12,6 @@ namespace Alteva.Infrastructure.Tests;
 public class MessageSerializationTests
 {
     [Fact]
-    public void CrawlJobRequestedMessage_ShouldSerializeAndDeserializeAccurately()
-    {
-        var jobId = Guid.NewGuid();
-        var now = DateTime.UtcNow;
-
-        var original = new CrawlJobRequestedMessage
-        {
-            JobId = jobId,
-            InputUrl = "https://example.com/test",
-            MaxDepth = 3,
-            SubmittedAt = now
-        };
-
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(original);
-        var deserialized = JsonSerializer.Deserialize<CrawlJobRequestedMessage>(bytes);
-
-        deserialized.Should().NotBeNull();
-        deserialized!.JobId.Should().Be(jobId);
-        deserialized.InputUrl.Should().Be("https://example.com/test");
-        deserialized.MaxDepth.Should().Be(3);
-    }
-
-    [Fact]
     public void CrawlPageMessage_ShouldSerializeAndDeserializeAccurately()
     {
         var jobId = Guid.NewGuid();
@@ -43,7 +20,8 @@ public class MessageSerializationTests
             JobId = jobId,
             Url = "https://example.com/docs/intro",
             Depth = 1,
-            MaxDepth = 3
+            MaxDepth = 3,
+            RootUrl = "https://example.com/"
         };
 
         var bytes = JsonSerializer.SerializeToUtf8Bytes(original);
@@ -54,6 +32,7 @@ public class MessageSerializationTests
         deserialized.Url.Should().Be("https://example.com/docs/intro");
         deserialized.Depth.Should().Be(1);
         deserialized.MaxDepth.Should().Be(3);
+        deserialized.RootUrl.Should().Be("https://example.com/");
     }
 
     [Fact]

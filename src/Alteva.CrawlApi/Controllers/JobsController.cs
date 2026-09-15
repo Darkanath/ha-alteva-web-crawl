@@ -21,12 +21,14 @@ namespace Alteva.CrawlApi.Controllers;
 [Produces("application/json")]
 public class JobsController(
     AppDbContext dbContext,
+    ICrawlStateStore crawlStateStore,
     IMessagePublisher messagePublisher,
     IUrlNormalizer urlNormalizer,
     IJobTreeBuilder treeBuilder,
     ILogger<JobsController> logger) : ControllerBase
 {
     private readonly AppDbContext _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
+    private readonly ICrawlStateStore _crawlStateStore = crawlStateStore ?? throw new ArgumentNullException(nameof(crawlStateStore));
     private readonly IMessagePublisher _messagePublisher = messagePublisher ?? throw new ArgumentNullException(nameof(messagePublisher));
     private readonly IUrlNormalizer _urlNormalizer = urlNormalizer ?? throw new ArgumentNullException(nameof(urlNormalizer));
     private readonly IJobTreeBuilder _treeBuilder = treeBuilder ?? throw new ArgumentNullException(nameof(treeBuilder));
@@ -61,29 +63,20 @@ public class JobsController(
             });
         }
 
-        var job = new Job
-        {
-            Id = Guid.NewGuid(),
-            InputUrl = normalizedUrl,
-            MaxDepth = request.MaxDepth ?? 2,
-            Status = JobStatus.Pending,
-            CreatedAt = DateTime.UtcNow
-        };
-
-        _dbContext.Jobs.Add(job);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        var job = await _crawlStateStore.CreateJobAsync(normalizedUrl, request.MaxDepth ?? 2, cancellationToken);
 
         _logger.LogInformation("Job {JobId} registered with status {Status} for URL {Url}", job.Id, job.Status, job.InputUrl);
 
-        // Publish event to message broker for background processing
+        // Publish the root page; the worker recursively publishes its children
         try
         {
-            await _messagePublisher.PublishAsync(new CrawlJobRequestedMessage
+            await _messagePublisher.PublishAsync(new CrawlPageMessage
             {
                 JobId = job.Id,
-                InputUrl = job.InputUrl,
+                Url = job.InputUrl,
+                Depth = 0,
                 MaxDepth = job.MaxDepth,
-                SubmittedAt = job.CreatedAt
+                RootUrl = job.InputUrl
             }, cancellationToken: cancellationToken);
         }
         catch (Exception ex)

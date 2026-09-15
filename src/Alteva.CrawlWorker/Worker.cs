@@ -1,12 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using Alteva.CrawlWorker.Services;
-using Alteva.Domain.Entities;
 using Alteva.Domain.Models;
-using Alteva.Infrastructure.Data;
 using Alteva.Infrastructure.Messaging;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -17,31 +13,29 @@ using RabbitMQ.Client.Events;
 namespace Alteva.CrawlWorker;
 
 /// <summary>
-/// Background worker service that consumes crawl requests from RabbitMQ,
-/// orchestrates the CrawlerEngine, and persists results idempotently to SQL Server.
+/// Single RabbitMQ consumer for <see cref="CrawlPageMessage"/>s. Handles one message at a time via
+/// <see cref="PageCrawlHandler"/> and owns all ack/nack decisions (architecture_notes.md §3.6).
 /// </summary>
 public class Worker : BackgroundService
 {
     private readonly IOptions<RabbitMQOptions> _rabbitOptions;
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly IConfiguration _configuration;
     private readonly IHostApplicationLifetime _hostApplicationLifetime;
     private readonly ILogger<Worker> _logger;
 
     private IConnection? _connection;
     private IModel? _channel;
     private const int MaxLoggedPayloadLength = 500;
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public Worker(
         IOptions<RabbitMQOptions> rabbitOptions,
         IServiceScopeFactory scopeFactory,
-        IConfiguration configuration,
         IHostApplicationLifetime hostApplicationLifetime,
         ILogger<Worker> logger)
     {
         _rabbitOptions = rabbitOptions ?? throw new ArgumentNullException(nameof(rabbitOptions));
         _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
-        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _hostApplicationLifetime = hostApplicationLifetime ?? throw new ArgumentNullException(nameof(hostApplicationLifetime));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -93,184 +87,91 @@ public class Worker : BackgroundService
         }
         catch (Exception ex)
         {
-            // ProcessMessageAsync already acks/nacks on every path it expects; this is a
-            // last-resort guard so a truly unexpected exception can't crash the dispatch loop.
-            _logger.LogError(ex, "Unexpected exception escaped ProcessMessageAsync for delivery {DeliveryTag}.", ea.DeliveryTag);
+            // ProcessMessageAsync acks/nacks on every expected path; this last-resort guard keeps an
+            // unexpected exception (e.g. the ack itself failing) from crashing the dispatch loop.
+            _logger.LogError(ex, "Unexpected exception handling delivery {DeliveryTag}.", ea.DeliveryTag);
         }
     }
 
     private async Task ProcessMessageAsync(BasicDeliverEventArgs ea, CancellationToken stoppingToken)
     {
-        var deliveryTag = ea.DeliveryTag;
-        string rawJson = string.Empty;
-        CrawlJobRequestedMessage? message = null;
+        var message = TryDeserialize(ea);
+        if (message == null)
+        {
+            // Malformed or old-contract payload: never retryable -> dead-letter queue.
+            NackMessage(ea.DeliveryTag, requeue: false);
+            return;
+        }
 
         try
         {
-            rawJson = Encoding.UTF8.GetString(ea.Body.ToArray());
-            _logger.LogInformation("Received crawl job message. DeliveryTag={DeliveryTag}, Length={Length}", deliveryTag, rawJson.Length);
-
-            message = JsonSerializer.Deserialize<CrawlJobRequestedMessage>(rawJson, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
-            if (message == null || message.JobId == Guid.Empty || string.IsNullOrWhiteSpace(message.InputUrl))
-            {
-                _logger.LogWarning("Poison message detected (invalid payload). Routing directly to DLQ. Raw: {RawJson}", TruncatePayloadForLogging(rawJson));
-
-                // A JobId lets us record the failure even though the payload is otherwise unusable
-                if (message != null && message.JobId != Guid.Empty)
-                {
-                    await MarkJobFailedAsync(message.JobId, "Message payload failed validation (missing or invalid InputUrl).");
-                }
-
-                // Reject without requeue -> routes to Dead Letter Queue
-                NackMessage(deliveryTag, requeue: false);
-                return;
-            }
-
             using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            var crawlerEngine = scope.ServiceProvider.GetRequiredService<ICrawlerEngine>();
-
-            var job = await dbContext.Jobs.FirstOrDefaultAsync(j => j.Id == message.JobId, stoppingToken);
-            if (job == null)
-            {
-                _logger.LogWarning("Job {JobId} not found in database. Discarding message.", message.JobId);
-                AckMessage(deliveryTag);
-                return;
-            }
-
-            if (job.Status == JobStatus.Canceled)
-            {
-                _logger.LogInformation("Job {JobId} was already canceled. Skipping crawl.", message.JobId);
-                AckMessage(deliveryTag);
-                return;
-            }
-
-            // Reset the retry counter only for a genuinely fresh dispatch (Pending, or a
-            // re-run after a prior terminal state). A redelivery of a message that is
-            // already Running belongs to the SAME retry sequence started above, so the
-            // counter must be left alone here or every requeued redelivery would wipe
-            // it back to 0 and the retry limit could never be reached.
-            if (job.Status != JobStatus.Running)
-            {
-                job.RetryCount = 0;
-            }
-
-            job.Status = JobStatus.Running;
-            job.StartedAt = DateTime.UtcNow;
-            await dbContext.SaveChangesAsync(stoppingToken);
-
-            var maxDepth = message.MaxDepth > 0 ? message.MaxDepth : 2;
-            var maxPages = _configuration.GetValue<int>("MAX_PAGES_SAFETY_LIMIT", 200);
-
-            _logger.LogInformation("Executing crawl for Job {JobId}: {Url} (MaxDepth={MaxDepth}, MaxPages={MaxPages})",
-                message.JobId, message.InputUrl, maxDepth, maxPages);
-
-            var crawlResult = await crawlerEngine.CrawlAsync(message.JobId, message.InputUrl, maxDepth, maxPages, stoppingToken);
-
-            if (crawlResult.Success)
-            {
-                // Persist results idempotently:
-                // Clear any partial pages or edges from prior attempts for this JobId
-                var existingPages = await dbContext.Pages.Where(p => p.JobId == message.JobId).ToListAsync(stoppingToken);
-                if (existingPages.Count > 0)
-                {
-                    dbContext.Pages.RemoveRange(existingPages);
-                }
-
-                var existingEdges = await dbContext.Edges.Where(e => e.JobId == message.JobId).ToListAsync(stoppingToken);
-                if (existingEdges.Count > 0)
-                {
-                    dbContext.Edges.RemoveRange(existingEdges);
-                }
-
-                dbContext.Pages.AddRange(crawlResult.Pages);
-                dbContext.Edges.AddRange(crawlResult.Edges);
-
-                job.Status = JobStatus.Completed;
-                job.CompletedAt = DateTime.UtcNow;
-                job.FailureReason = null;
-
-                await dbContext.SaveChangesAsync(stoppingToken);
-
-                AckMessage(deliveryTag);
-                _logger.LogInformation("Job {JobId} completed successfully. Persisted {PageCount} pages and {EdgeCount} edges.",
-                    message.JobId, crawlResult.Pages.Count, crawlResult.Edges.Count);
-            }
-            else
-            {
-                // Logical crawl failure (e.g. root URL unreachable, invalid HTML, HTTP error)
-                _logger.LogWarning("Job {JobId} crawl failed logically: {ErrorMessage}", message.JobId, crawlResult.ErrorMessage);
-
-                job.Status = JobStatus.Failed;
-                job.CompletedAt = DateTime.UtcNow;
-                job.FailureReason = crawlResult.ErrorMessage;
-
-                await dbContext.SaveChangesAsync(stoppingToken);
-
-                // Acknowledge because failure was recorded permanently in DB
-                AckMessage(deliveryTag);
-            }
+            await scope.ServiceProvider.GetRequiredService<PageCrawlHandler>().HandleAsync(message, stoppingToken);
+            AckMessage(ea.DeliveryTag);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            _logger.LogWarning("Execution canceled for delivery {DeliveryTag}. Requeuing message.", deliveryTag);
-            NackMessage(deliveryTag, requeue: true);
+            _logger.LogWarning("Shutting down while handling {Url} (job {JobId}). Requeuing.", message.Url, message.JobId);
+            NackMessage(ea.DeliveryTag, requeue: true);
         }
-        catch (JsonException ex)
+        catch (Exception ex) when (!ea.Redelivered)
         {
-            _logger.LogWarning(ex, "Poison message detected (malformed JSON). Routing directly to DLQ. DeliveryTag={DeliveryTag}, Raw: {RawJson}",
-                deliveryTag, TruncatePayloadForLogging(rawJson));
-
-            // No JobId can be recovered from unparseable JSON, so there is no Job row to mark Failed here.
-            // Malformed JSON is not a transient failure; reject without requeue -> routes to Dead Letter Queue
-            NackMessage(deliveryTag, requeue: false);
+            // First failure: retry once. A requeued message keeps its position in the queue.
+            _logger.LogWarning(ex, "Failed handling {Url} (job {JobId}). Requeuing for one retry.", message.Url, message.JobId);
+            NackMessage(ea.DeliveryTag, requeue: true);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unhandled exception processing delivery {DeliveryTag}.", deliveryTag);
+            _logger.LogError(ex, "Failed handling {Url} (job {JobId}) on redelivery. Marking the page Failed.", message.Url, message.JobId);
+            await FailPageOrDeadLetterAsync(ea, message, ex);
+        }
+    }
 
-            if (message == null || message.JobId == Guid.Empty)
+    private async Task FailPageOrDeadLetterAsync(BasicDeliverEventArgs ea, CrawlPageMessage message, Exception failure)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var handler = scope.ServiceProvider.GetRequiredService<PageCrawlHandler>();
+            if (await handler.FailPageAsync(message, $"Processing failed after retry: {failure.Message}", CancellationToken.None))
             {
-                // Can't identify which Job this delivery belongs to, so there is no
-                // row to track a retry count on. Route straight to DLQ rather than
-                // requeueing a message we can never make progress on.
-                _logger.LogError("Delivery {DeliveryTag} could not be attributed to a Job. Routing to DLQ.", deliveryTag);
-                NackMessage(deliveryTag, requeue: false);
+                AckMessage(ea.DeliveryTag);
                 return;
             }
 
-            // The primary queue is a classic queue, so RabbitMQ never populates the
-            // x-delivery-count header on redelivery. Track attempts on the Job row
-            // itself instead so the retry budget survives across redeliveries.
-            using var retryScope = _scopeFactory.CreateScope();
-            var retryTracker = retryScope.ServiceProvider.GetRequiredService<IRetryTracker>();
-            var retryCount = await retryTracker.RegisterFailureAsync(message.JobId, stoppingToken);
+            _logger.LogError("Could not mark {Url} (job {JobId}) Failed (job inactive or page already finished). Dead-lettering.", message.Url, message.JobId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not mark {Url} (job {JobId}) Failed. Dead-lettering.", message.Url, message.JobId);
+        }
 
-            if (retryTracker.IsExhausted(retryCount))
+        NackMessage(ea.DeliveryTag, requeue: false);
+    }
+
+    private CrawlPageMessage? TryDeserialize(BasicDeliverEventArgs ea)
+    {
+        var rawJson = Encoding.UTF8.GetString(ea.Body.Span);
+        try
+        {
+            var message = JsonSerializer.Deserialize<CrawlPageMessage>(rawJson, JsonOptions);
+            if (message != null
+                && message.JobId != Guid.Empty
+                && !string.IsNullOrWhiteSpace(message.Url)
+                && !string.IsNullOrWhiteSpace(message.RootUrl)
+                && message.Depth >= 0
+                && message.Depth <= message.MaxDepth)
             {
-                _logger.LogError("Job {JobId} delivery {DeliveryTag} exceeded max retry attempts ({MaxRetryAttempts}). Routing to DLQ.",
-                    message.JobId, deliveryTag, retryTracker.MaxRetryAttempts);
-
-                await MarkJobFailedAsync(message.JobId,
-                    $"Exceeded max retry attempts ({retryTracker.MaxRetryAttempts}) after repeated transient failures: {ex.Message}");
-
-                // Reject with requeue=false so RabbitMQ routes to Dead Letter Queue
-                NackMessage(deliveryTag, requeue: false);
-            }
-            else
-            {
-                _logger.LogWarning("Job {JobId} delivery {DeliveryTag} encountered transient failure (attempt {Attempt}/{MaxAttempts}). Requeuing.",
-                    message.JobId, deliveryTag, retryCount, retryTracker.MaxRetryAttempts);
-
-                // Increment retry delay before requeue
-                await Task.Delay(TimeSpan.FromSeconds(2 * retryCount), stoppingToken);
-                NackMessage(deliveryTag, requeue: true);
+                return message;
             }
         }
+        catch (JsonException)
+        {
+        }
+
+        _logger.LogWarning("Poison message (invalid CrawlPageMessage) routed to the dead-letter queue. DeliveryTag={DeliveryTag}, Raw: {RawJson}",
+            ea.DeliveryTag, TruncatePayloadForLogging(rawJson));
+        return null;
     }
 
     private Task OnConsumerCancelledAsync(object sender, ConsumerEventArgs e)
@@ -305,34 +206,6 @@ public class Worker : BackgroundService
     {
         _logger.LogError(e.Exception, "RabbitMQ automatic recovery failed after exhausting retry attempts. Stopping the worker host so the container can be restarted.");
         _hostApplicationLifetime.StopApplication();
-    }
-
-    private async Task MarkJobFailedAsync(Guid jobId, string failureReason)
-    {
-        try
-        {
-            // Use a fresh scope/DbContext (not the one active when the failure occurred) so this
-            // still succeeds when the original failure was itself a database error, and use
-            // CancellationToken.None so the failure is recorded even if the host is shutting down.
-            using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-            var job = await dbContext.Jobs.FirstOrDefaultAsync(j => j.Id == jobId, CancellationToken.None);
-            if (job == null)
-            {
-                return;
-            }
-
-            job.Status = JobStatus.Failed;
-            job.CompletedAt = DateTime.UtcNow;
-            job.FailureReason = failureReason;
-
-            await dbContext.SaveChangesAsync(CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to mark Job {JobId} as Failed after dead-lettering.", jobId);
-        }
     }
 
     private static string TruncatePayloadForLogging(string payload)
