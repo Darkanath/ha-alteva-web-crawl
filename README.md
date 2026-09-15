@@ -1,7 +1,7 @@
-# Alteva Web Crawler System
+# Home Assignment - Alteva - Web Crawler System
 
 ## Overview
-Alteva is a distributed, event-driven web crawler system designed to traverse websites up to a specified depth and compute the **Domain Link Ratio** for each discovered page. 
+This is a home assignment for a distributed, event-driven web crawler system designed to traverse websites up to a specified depth and compute the **Domain Link Ratio** for each discovered page. 
 
 The system leverages a decoupled architecture, separating the API orchestration layer from the background crawl execution engine.
 
