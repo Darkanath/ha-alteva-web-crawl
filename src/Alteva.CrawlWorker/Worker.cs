@@ -60,8 +60,7 @@ public class Worker : BackgroundService
 
         var options = _rabbitOptions.Value;
 
-        // Ensure RabbitMQ topology is declared
-        DeclareTopology(_channel, options);
+        RabbitMQTopology.Declare(_channel, options);
 
         // One message at a time: prefetch 1, and the handler awaits the whole crawl before the
         // dispatcher delivers the next message.
@@ -351,52 +350,6 @@ public class Worker : BackgroundService
     private void NackMessage(ulong deliveryTag, bool requeue)
     {
         _channel?.BasicNack(deliveryTag, multiple: false, requeue: requeue);
-    }
-
-    private void DeclareTopology(IModel channel, RabbitMQOptions options)
-    {
-        // 1. Declare Dead Letter Exchange & Queue
-        channel.ExchangeDeclare(
-            exchange: options.DeadLetterExchange,
-            type: ExchangeType.Direct,
-            durable: true,
-            autoDelete: false);
-
-        channel.QueueDeclare(
-            queue: options.DeadLetterQueue,
-            durable: true,
-            exclusive: false,
-            autoDelete: false);
-
-        channel.QueueBind(
-            queue: options.DeadLetterQueue,
-            exchange: options.DeadLetterExchange,
-            routingKey: options.DeadLetterRoutingKey);
-
-        // 2. Declare Primary Work Exchange & Queue with DLX configuration
-        channel.ExchangeDeclare(
-            exchange: options.ExchangeName,
-            type: ExchangeType.Direct,
-            durable: true,
-            autoDelete: false);
-
-        var queueArguments = new Dictionary<string, object>
-        {
-            { "x-dead-letter-exchange", options.DeadLetterExchange },
-            { "x-dead-letter-routing-key", options.DeadLetterRoutingKey }
-        };
-
-        channel.QueueDeclare(
-            queue: options.QueueName,
-            durable: true,
-            exclusive: false,
-            autoDelete: false,
-            arguments: queueArguments);
-
-        channel.QueueBind(
-            queue: options.QueueName,
-            exchange: options.ExchangeName,
-            routingKey: options.RoutingKey);
     }
 
     private async Task ConnectWithRetryAsync(CancellationToken stoppingToken)
