@@ -41,18 +41,20 @@ gantt
 ---
 
 ## Milestone 2: Crawl API & Job Orchestration
-- **Status:** In Progress
+- **Status:** Complete (100%)
 - **Target:** Expose RESTful endpoints for submitting crawl jobs, querying job status, paginating job history, and retrieving page trees.
 - **Key Deliverables:**
   - `POST /api/jobs`: Validates input URL and `maxDepth`, persists `Pending` job in DB, publishes event to RabbitMQ.
   - `GET /api/jobs/{id}`: Returns job status, execution timestamps, failure reasons, and hierarchical tree result.
   - `GET /api/jobs`: Returns paginated job history sorted by `CreatedAt` descending.
-  - Swagger/OpenAPI documentation and integration tests.
+  - `POST /api/jobs/{id}/cancel`: Cancels pending or running jobs.
+  - `/health` endpoint and CORS policy for React frontend.
+  - 18 unit/integration tests in `Alteva.CrawlApi.Tests` covering all controller endpoints and validation.
 
 ---
 
 ## Milestone 3: Event-Driven Worker Pipeline & Idempotent Persistence
-- **Status:** Planned
+- **Status:** Active (In Progress)
 - **Target:** Reliable message consumption, automated retries for transient HTTP/DB failures, dead-letter queue (DLQ) handling, and idempotent writes.
 - **Key Deliverables:**
   - RabbitMQ consumer binding with explicit acknowledgments (`ack` / `nack`).

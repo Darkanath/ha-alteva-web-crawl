@@ -38,10 +38,10 @@
   - [x] Configure cascading foreign keys from `Job` to `Pages` and `Edges`.
 - [x] **Task 2.2: Initial EF Core Migration**
   - [x] Generate initial migration for schema creation.
-- [ ] **Task 2.3: Message Broker Abstraction**
-  - [ ] Define `IMessagePublisher` and `IMessageConsumer` interfaces.
-  - [ ] Implement RabbitMQ publisher using exchange/queue configuration with durable queues.
-  - [ ] Implement dead-letter exchange (`dlx`) binding.
+- [x] **Task 2.3: Message Broker Abstraction**
+  - [x] Define `IMessagePublisher` interface.
+  - [x] Implement RabbitMQ publisher using exchange/queue configuration with durable queues.
+  - [x] Implement dead-letter exchange (`dlx`) and DLQ binding with persistent delivery.
 
 ---
 
@@ -49,15 +49,16 @@
 
 - [x] **Task 3.1: DTO Models & Validation**
   - [x] Create `CreateCrawlJobRequest` with URL format and depth validation (`[Range(1, 10)]`).
-  - [x] Create `CreateCrawlJobResponse` and `CrawlJobDetailsResponse`.
-- [ ] **Task 3.2: Jobs Controller Implementation**
-  - [ ] `POST /api/jobs`: Persist new job and enqueue `CrawlJobRequestedMessage`.
-  - [ ] `GET /api/jobs/{id}`: Retrieve job status and assembled page tree.
-  - [ ] `GET /api/jobs`: Paginated history list sorted by `CreatedAt DESC`.
-  - [ ] Optional: `POST /api/jobs/{id}/cancel`: Mark job as `Canceled`.
-- [ ] **Task 3.3: Health Check & Swagger**
-  - [ ] Enable `/health` endpoint for Docker container health check.
-  - [ ] Document endpoints via Swagger UI.
+  - [x] Create `CreateCrawlJobResponse`, `CrawlJobDetailsResponse`, and `PaginatedListResponse`.
+- [x] **Task 3.2: Jobs Controller Implementation**
+  - [x] `POST /api/jobs`: Persist new job and enqueue `CrawlJobRequestedMessage`.
+  - [x] `GET /api/jobs/{id}`: Retrieve job status and assembled page tree.
+  - [x] `GET /api/jobs`: Paginated history list sorted by `CreatedAt DESC`.
+  - [x] `POST /api/jobs/{id}/cancel`: Mark pending or running job as `Canceled`.
+- [x] **Task 3.3: Health Check & Swagger**
+  - [x] Enable `/health` endpoint for Docker container health check.
+  - [x] Enable CORS policy for frontend client communication.
+  - [x] Document endpoints via Swagger UI.
 
 ---
 

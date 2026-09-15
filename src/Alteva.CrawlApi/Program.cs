@@ -1,9 +1,15 @@
+using Alteva.Domain.Services;
 using Alteva.Infrastructure.Data;
+using Alteva.Infrastructure.Messaging;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
+// ==========================================
+// Service Registrations
+// ==========================================
+
+// Database Persistence
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
@@ -11,23 +17,50 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(connectionString);
 });
 
+// RabbitMQ Options & Messaging Publisher
+builder.Services.Configure<RabbitMQOptions>(builder.Configuration.GetSection(RabbitMQOptions.SectionName));
+builder.Services.AddSingleton<IMessagePublisher, RabbitMQMessagePublisher>();
+
+// Domain Services
+builder.Services.AddSingleton<IUrlNormalizer, UrlNormalizer>();
+builder.Services.AddSingleton<IDomainLinkRatioCalculator, DomainLinkRatioCalculator>();
+builder.Services.AddSingleton<IJobTreeBuilder, JobTreeBuilder>();
+
+// CORS policy for Frontend SPA
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
 builder.Services.AddControllers();
+builder.Services.AddHealthChecks();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
+// ==========================================
+// HTTP Request Pipeline
+// ==========================================
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
-
+app.UseCors();
 app.UseAuthorization();
 
+app.MapHealthChecks("/health");
 app.MapControllers();
 
 app.Run();
+
+// Needed for WebApplicationFactory in integration tests
+public partial class Program { }
