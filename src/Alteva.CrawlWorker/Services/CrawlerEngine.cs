@@ -6,6 +6,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Alteva.Domain.Entities;
 using Alteva.Domain.Services;
+using System.Collections.Concurrent;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace Alteva.CrawlWorker.Services;
@@ -15,13 +17,18 @@ public class CrawlerEngine(
     IUrlNormalizer urlNormalizer,
     IHtmlLinkExtractor htmlLinkExtractor,
     IDomainLinkRatioCalculator ratioCalculator,
+    IConfiguration configuration,
     ILogger<CrawlerEngine> logger) : ICrawlerEngine
 {
     private readonly HttpClient _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
     private readonly IUrlNormalizer _urlNormalizer = urlNormalizer ?? throw new ArgumentNullException(nameof(urlNormalizer));
     private readonly IHtmlLinkExtractor _htmlLinkExtractor = htmlLinkExtractor ?? throw new ArgumentNullException(nameof(htmlLinkExtractor));
     private readonly IDomainLinkRatioCalculator _ratioCalculator = ratioCalculator ?? throw new ArgumentNullException(nameof(ratioCalculator));
+    private readonly IConfiguration _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
     private readonly ILogger<CrawlerEngine> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+
+    // Global per-domain politeness limiters
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _domainSemaphores = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly record struct PageFetchOutcome(string? Html, bool IsHardFailure, string? ErrorMessage);
 
@@ -248,29 +255,51 @@ public class CrawlerEngine(
 
     private async Task<PageFetchOutcome> FetchHtmlAsync(Guid jobId, string url, CancellationToken cancellationToken)
     {
+        string host;
         try
         {
-            using var response = await _httpClient.GetAsync(url, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning("Job {JobId}: Failed to fetch {Url}. Status: {StatusCode}", jobId, url, response.StatusCode);
-                return new PageFetchOutcome(null, true, $"Root URL returned HTTP status {response.StatusCode}.");
-            }
-
-            var contentType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
-            if (!contentType.Contains("html", StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.LogInformation("Job {JobId}: Skipping non-HTML resource {Url} (Type: {ContentType})", jobId, url, contentType);
-                return new PageFetchOutcome(null, false, null);
-            }
-
-            var html = await response.Content.ReadAsStringAsync(cancellationToken);
-            return new PageFetchOutcome(html, false, null);
+            host = _urlNormalizer.ExtractHost(url);
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        catch
         {
-            _logger.LogWarning(ex, "Job {JobId}: Network or timeout error fetching {Url}", jobId, url);
-            return new PageFetchOutcome(null, true, $"Failed to fetch root URL: {ex.Message}");
+            // Fallback for malformed URLs
+            host = "unknown";
+        }
+
+        var maxConcurrentPerDomain = Math.Max(1, _configuration.GetValue<int>("CRAWLER_MAX_CONCURRENT_PER_DOMAIN", 2));
+        var domainSemaphore = _domainSemaphores.GetOrAdd(host, _ => new SemaphoreSlim(maxConcurrentPerDomain, maxConcurrentPerDomain));
+
+        await domainSemaphore.WaitAsync(cancellationToken);
+        try
+        {
+            try
+            {
+                using var response = await _httpClient.GetAsync(url, cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("Job {JobId}: Failed to fetch {Url}. Status: {StatusCode}", jobId, url, response.StatusCode);
+                    return new PageFetchOutcome(null, true, $"Root URL returned HTTP status {response.StatusCode}.");
+                }
+
+                var contentType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
+                if (!contentType.Contains("html", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation("Job {JobId}: Skipping non-HTML resource {Url} (Type: {ContentType})", jobId, url, contentType);
+                    return new PageFetchOutcome(null, false, null);
+                }
+
+                var html = await response.Content.ReadAsStringAsync(cancellationToken);
+                return new PageFetchOutcome(html, false, null);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Job {JobId}: Network or timeout error fetching {Url}", jobId, url);
+                return new PageFetchOutcome(null, true, $"Failed to fetch root URL: {ex.Message}");
+            }
+        }
+        finally
+        {
+            domainSemaphore.Release();
         }
     }
 }
