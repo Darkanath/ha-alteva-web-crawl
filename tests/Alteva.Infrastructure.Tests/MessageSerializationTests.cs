@@ -35,6 +35,28 @@ public class MessageSerializationTests
     }
 
     [Fact]
+    public void CrawlPageMessage_ShouldSerializeAndDeserializeAccurately()
+    {
+        var jobId = Guid.NewGuid();
+        var original = new CrawlPageMessage
+        {
+            JobId = jobId,
+            Url = "https://example.com/docs/intro",
+            Depth = 1,
+            MaxDepth = 3
+        };
+
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(original);
+        var deserialized = JsonSerializer.Deserialize<CrawlPageMessage>(bytes, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        deserialized.Should().NotBeNull();
+        deserialized!.JobId.Should().Be(jobId);
+        deserialized.Url.Should().Be("https://example.com/docs/intro");
+        deserialized.Depth.Should().Be(1);
+        deserialized.MaxDepth.Should().Be(3);
+    }
+
+    [Fact]
     public void RabbitMQOptions_ShouldNotContainHardcodedCredentialsOrHostsByDefault()
     {
         var options = new RabbitMQOptions();

@@ -141,6 +141,48 @@ public class AppDbContextIdempotencyTests : IDisposable
     }
 
     [Fact]
+    public async Task Page_ClaimedRow_DefaultsToQueuedWithNoRatio_AndPersistsCrawlState()
+    {
+        var jobId = Guid.NewGuid();
+        var pageId = Guid.NewGuid();
+        using (var context = new AppDbContext(_options))
+        {
+            context.Jobs.Add(new Job { Id = jobId, InputUrl = "https://example.com", Status = JobStatus.Running, ClaimedPages = 1 });
+            context.Pages.Add(new Page { Id = pageId, JobId = jobId, Url = "https://example.com/", Depth = 1 });
+            await context.SaveChangesAsync();
+        }
+
+        using (var context = new AppDbContext(_options))
+        {
+            var claimed = await context.Pages.SingleAsync(p => p.Id == pageId);
+            claimed.Status.Should().Be(PageStatus.Queued);
+            claimed.DomainLinkRatio.Should().BeNull();
+            claimed.Depth.Should().Be(1);
+
+            claimed.Status = PageStatus.Failed;
+            claimed.RetryCount = 3;
+            claimed.FailureReason = "HTTP 503";
+            await context.SaveChangesAsync();
+        }
+
+        using (var context = new AppDbContext(_options))
+        {
+            var page = await context.Pages.SingleAsync(p => p.Id == pageId);
+            page.Status.Should().Be(PageStatus.Failed);
+            page.RetryCount.Should().Be(3);
+            page.FailureReason.Should().Be("HTTP 503");
+
+            var job = await context.Jobs.FindAsync(jobId);
+            job!.ClaimedPages.Should().Be(1);
+
+            // The completion check filters on the stored status value
+            var unfinished = await context.Pages
+                .CountAsync(p => p.JobId == jobId && (p.Status == PageStatus.Queued || p.Status == PageStatus.Processing));
+            unfinished.Should().Be(0);
+        }
+    }
+
+    [Fact]
     public async Task CascadeDelete_WhenJobIsDeleted_PagesAndEdgesAreAlsoDeleted()
     {
         var jobId = Guid.NewGuid();

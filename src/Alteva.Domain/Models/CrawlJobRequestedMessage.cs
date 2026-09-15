@@ -5,6 +5,7 @@ namespace Alteva.Domain.Models;
 /// <summary>
 /// Event message published when a new web crawl job has been initiated.
 /// Consumed by background crawl workers.
+/// Superseded by <see cref="CrawlPageMessage"/>; removed once the API and worker switch over.
 /// </summary>
 public class CrawlJobRequestedMessage
 {

@@ -66,6 +66,16 @@ public class AppDbContext : DbContext
             entity.HasIndex(e => new { e.JobId, e.Url })
                 .IsUnique();
 
+            entity.Property(e => e.Status)
+                .HasConversion<string>()
+                .HasMaxLength(20);
+
+            entity.Property(e => e.FailureReason)
+                .HasMaxLength(2048);
+
+            // Supports the job-completion check: "any Queued/Processing pages left for this job?"
+            entity.HasIndex(e => new { e.JobId, e.Status });
+
             // Setup foreign key relationship
             entity.HasOne<Job>()
                 .WithMany()

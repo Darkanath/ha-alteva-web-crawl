@@ -26,6 +26,29 @@ public class Page
     /// <summary>
     /// The calculated ratio of outgoing links that remain on the same domain
     /// versus the total number of outgoing links on this page.
+    /// Null until the page has been fetched and parsed (<see cref="PageStatus.Done"/>).
     /// </summary>
-    public double DomainLinkRatio { get; set; }
+    public double? DomainLinkRatio { get; set; }
+
+    /// <summary>
+    /// Shortest known link distance from the job's root URL (root = 0). Lowered when a
+    /// shorter path to the page is discovered, which re-queues it for expansion.
+    /// </summary>
+    public int Depth { get; set; }
+
+    /// <summary>
+    /// Current crawl state of this page. Rows are inserted as <see cref="PageStatus.Queued"/>
+    /// when claimed, so the (JobId, Url) unique index doubles as the dedupe gate.
+    /// </summary>
+    public PageStatus Status { get; set; } = PageStatus.Queued;
+
+    /// <summary>
+    /// Number of transient processing failures recorded for this page's crawl message.
+    /// </summary>
+    public int RetryCount { get; set; }
+
+    /// <summary>
+    /// Why the page ended up <see cref="PageStatus.Failed"/> or <see cref="PageStatus.Skipped"/>.
+    /// </summary>
+    public string? FailureReason { get; set; }
 }
