@@ -89,7 +89,8 @@ public class UrlNormalizer : IUrlNormalizer
             builder.Query = string.Empty;
         }
 
-        return builder.Uri.ToString();
+        // AbsoluteUri, not ToString(): ToString() unescapes percent-encoding (e.g. "%26" -> "&"), changing the URL
+        return builder.Uri.AbsoluteUri;
     }
 
     /// <inheritdoc />

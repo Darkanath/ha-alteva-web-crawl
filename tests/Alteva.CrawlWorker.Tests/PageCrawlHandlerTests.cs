@@ -79,6 +79,9 @@ public class PageCrawlHandlerTests : IDisposable
         public HashSet<string> Hanging { get; } = new();
         public Dictionary<string, string> NonHtml { get; } = new();
 
+        /// <summary>Simulated redirects: requested URL -> URL whose content is served (and reported as the final request URI).</summary>
+        public Dictionary<string, string> Redirects { get; } = new();
+
         /// <summary>Failures served for a URL before its real content: an HTTP status (optionally with Retry-After seconds), or null for a network error.</summary>
         public Dictionary<string, Queue<(HttpStatusCode? Status, int? RetryAfterSeconds)>> Failures { get; } = new();
 
@@ -108,6 +111,14 @@ public class PageCrawlHandlerTests : IDisposable
                         error.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(seconds));
                     }
                     return error;
+                }
+
+                if (Redirects.TryGetValue(url, out var finalUrl))
+                {
+                    var redirected = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(pages[finalUrl]) };
+                    redirected.Content.Headers.ContentType = new MediaTypeHeaderValue("text/html");
+                    redirected.RequestMessage = new HttpRequestMessage(HttpMethod.Get, finalUrl); // as HttpClient reports after following a redirect
+                    return redirected;
                 }
 
                 if (NonHtml.TryGetValue(url, out var mediaType))
@@ -310,6 +321,32 @@ public class PageCrawlHandlerTests : IDisposable
         {
             (site.Requests[i].StartedAt - site.Requests[i - 1].StartedAt).Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(180));
         }
+    }
+
+    // ---------- Link resolution ----------
+
+    [Fact]
+    public async Task RelativeLinks_ResolveAgainstTheFinalUrl_NotTheNormalizedOne()
+    {
+        // "/docs" redirects to "/docs/", whose relative link "intro" means "/docs/intro" (not "/intro")
+        var site = new FixtureSite(new Dictionary<string, string>
+        {
+            [Root] = """<a href="/docs">Docs</a>""",
+            ["https://mock-site.test/docs/"] = """<a href="intro">Intro</a> <a href="?page=2&amp;sort=asc">Next</a>""",
+            ["https://mock-site.test/docs/intro"] = "<p>intro</p>"
+        });
+        site.Redirects["https://mock-site.test/docs"] = "https://mock-site.test/docs/";
+
+        var job = await SubmitJobAsync(maxDepth: 2);
+        await RunWorkerAsync(site);
+
+        var (savedJob, pages, _) = await LoadAsync(job.Id);
+        savedJob.Status.Should().Be(JobStatus.Completed);
+        pages.Select(p => p.Url).Should().BeEquivalentTo(
+            Root,
+            "https://mock-site.test/docs",
+            "https://mock-site.test/docs/intro",
+            "https://mock-site.test/docs?page=2&sort=asc"); // resolved against "/docs/", then normalized
     }
 
     // ---------- HTTP retries ----------

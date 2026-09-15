@@ -31,6 +31,15 @@ public class UrlNormalizerTests
     }
 
     [Theory]
+    [InlineData("https://example.com/search?q=a%26b", "https://example.com/search?q=a%26b")]
+    [InlineData("https://example.com/a%2Fb", "https://example.com/a%2Fb")]
+    [InlineData("https://example.com/my page", "https://example.com/my%20page")]
+    public void Normalize_ShouldPreservePercentEncoding(string input, string expected)
+    {
+        _normalizer.Normalize(input).Should().Be(expected);
+    }
+
+    [Theory]
     [InlineData("HTTP://EXAMPLE.COM/Path", "http://example.com/Path")]
     [InlineData("https://Www.Sub.Domain.Com/", "https://www.sub.domain.com/")]
     public void Normalize_ShouldLowercaseSchemeAndHost(string input, string expected)

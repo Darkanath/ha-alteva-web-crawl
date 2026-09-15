@@ -32,7 +32,8 @@ public class PageCrawler
     private readonly TimeSpan _delayMin;
     private readonly TimeSpan _delayMax;
 
-    private sealed record Attempt(string? Html, PageStatus Status, string? Reason, bool IsTransient, TimeSpan? RetryAfter);
+    /// <param name="BaseUrl">The URL the HTML was actually served from (after redirects); relative links resolve against it.</param>
+    private sealed record Attempt(string? Html, string? BaseUrl, PageStatus Status, string? Reason, bool IsTransient, TimeSpan? RetryAfter);
 
     public PageCrawler(
         HttpClient httpClient,
@@ -75,7 +76,7 @@ public class PageCrawler
             var result = await FetchAsync(message, cancellationToken);
             if (result.Html != null)
             {
-                return ParsePage(message, maxPages, result.Html);
+                return ParsePage(message, maxPages, result.Html, result.BaseUrl ?? message.Url);
             }
 
             if (!result.IsTransient || attempt == MaxAttempts)
@@ -101,23 +102,24 @@ public class PageCrawler
                 var status = (int)response.StatusCode;
                 var transient = response.StatusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || status >= 500;
                 _logger.LogWarning("Job {JobId}: {Url} returned HTTP {StatusCode}", message.JobId, message.Url, status);
-                return new Attempt(null, PageStatus.Failed, $"HTTP status {status} ({response.StatusCode}).", transient, GetRetryAfter(response));
+                return new Attempt(null, null, PageStatus.Failed, $"HTTP status {status} ({response.StatusCode}).", transient, GetRetryAfter(response));
             }
 
             var contentType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
             if (!contentType.Contains("html", StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogInformation("Job {JobId}: Skipping non-HTML resource {Url} ({ContentType})", message.JobId, message.Url, contentType);
-                return new Attempt(null, PageStatus.Skipped, $"Non-HTML content ({contentType}).", false, null);
+                return new Attempt(null, null, PageStatus.Skipped, $"Non-HTML content ({contentType}).", false, null);
             }
 
-            return new Attempt(await response.Content.ReadAsStringAsync(cancellationToken), PageStatus.Done, null, false, null);
+            var html = await response.Content.ReadAsStringAsync(cancellationToken);
+            return new Attempt(html, response.RequestMessage?.RequestUri?.AbsoluteUri, PageStatus.Done, null, false, null);
         }
         // HttpClient timeouts surface as TaskCanceledException without our token being cancelled.
         catch (Exception ex) when (ex is HttpRequestException || (ex is OperationCanceledException && !cancellationToken.IsCancellationRequested))
         {
             _logger.LogWarning(ex, "Job {JobId}: Network or timeout error fetching {Url}", message.JobId, message.Url);
-            return new Attempt(null, PageStatus.Failed, $"Failed to fetch: {ex.Message}", true, null);
+            return new Attempt(null, null, PageStatus.Failed, $"Failed to fetch: {ex.Message}", true, null);
         }
     }
 
@@ -133,14 +135,15 @@ public class PageCrawler
         return value < MaxRetryAfter ? value : MaxRetryAfter;
     }
 
-    private PageResult ParsePage(CrawlPageMessage message, int maxPages, string html)
+    private PageResult ParsePage(CrawlPageMessage message, int maxPages, string html, string baseUrl)
     {
         var startingHost = _urlNormalizer.ExtractHost(message.RootUrl);
         var linkedUrls = new List<string>();
         var childCandidates = new List<string>();
         foreach (var rawLink in _htmlLinkExtractor.ExtractLinks(html))
         {
-            var link = _urlNormalizer.Normalize(rawLink, message.Url);
+            // Not message.Url: normalization strips the trailing slash, which changes how "intro" resolves on "/docs/"
+            var link = _urlNormalizer.Normalize(rawLink, baseUrl);
             if (link == null)
             {
                 continue;

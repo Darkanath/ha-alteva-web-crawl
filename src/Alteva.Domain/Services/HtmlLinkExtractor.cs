@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Text.RegularExpressions;
 
 namespace Alteva.Domain.Services;
@@ -30,7 +31,8 @@ public partial class HtmlLinkExtractor : IHtmlLinkExtractor
                 var urlGroup = match.Groups["url"];
                 if (urlGroup.Success && !string.IsNullOrWhiteSpace(urlGroup.Value))
                 {
-                    links.Add(urlGroup.Value.Trim());
+                    // Attribute values are HTML-encoded: href="?a=1&amp;b=2" means "?a=1&b=2"
+                    links.Add(WebUtility.HtmlDecode(urlGroup.Value).Trim());
                 }
             }
         }

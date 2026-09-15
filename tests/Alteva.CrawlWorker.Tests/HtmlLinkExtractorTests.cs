@@ -35,6 +35,14 @@ public class HtmlLinkExtractorTests
     }
 
     [Fact]
+    public void ExtractLinks_DecodesHtmlEntitiesInHrefs()
+    {
+        var html = """<a href="/search?a=1&amp;b=2">Search</a> <a href='/caf&#233;'>Cafe</a>""";
+
+        _extractor.ExtractLinks(html).Should().Equal("/search?a=1&b=2", "/caf\u00e9");
+    }
+
+    [Fact]
     public void ExtractLinks_WithNoAnchorTags_ShouldReturnEmpty()
     {
         var html = "<div><p>No links here!</p></div>";
