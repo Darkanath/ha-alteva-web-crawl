@@ -11,13 +11,12 @@ namespace Alteva.CrawlWorker.Services;
 public interface ICrawlerEngine
 {
     /// <summary>
-    /// Executes a crawl job.
+    /// Executes a crawl job, downloading one page at a time with a politeness delay between downloads.
     /// </summary>
     Task<CrawlExecutionResult> CrawlAsync(
         Guid jobId,
         string rootUrl,
         int maxDepth = 2,
         int maxPages = 200,
-        int maxConcurrency = 5,
         CancellationToken cancellationToken = default);
 }

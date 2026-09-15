@@ -30,8 +30,6 @@ public class Worker : BackgroundService
 
     private IConnection? _connection;
     private IModel? _channel;
-    private SemaphoreSlim? _jobConcurrencyLimiter;
-    private readonly object _channelLock = new();
     private const int MaxLoggedPayloadLength = 500;
 
     public Worker(
@@ -65,34 +63,12 @@ public class Worker : BackgroundService
         // Ensure RabbitMQ topology is declared
         DeclareTopology(_channel, options);
 
-        // How many crawl jobs this worker instance processes concurrently. Prefetch is set to
-        // match, so RabbitMQ keeps that many unacked deliveries in flight for us.
-        var maxConcurrentJobs = Math.Max(1, _configuration.GetValue<int>("WORKER_MAX_CONCURRENT_JOBS", 1));
-        var jobConcurrencyLimiter = new SemaphoreSlim(maxConcurrentJobs, maxConcurrentJobs);
-        _jobConcurrencyLimiter = jobConcurrencyLimiter;
-        _channel.BasicQos(prefetchSize: 0, prefetchCount: (ushort)Math.Clamp(maxConcurrentJobs, 1, ushort.MaxValue), global: false);
+        // One message at a time: prefetch 1, and the handler awaits the whole crawl before the
+        // dispatcher delivers the next message.
+        _channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
 
         var consumer = new AsyncEventingBasicConsumer(_channel);
-        consumer.Received += async (sender, ea) =>
-        {
-            try
-            {
-                // Acquire a slot before returning from the handler, so the dispatcher can move on
-                // to deliver the next message immediately while this one processes in the
-                // background - that's what actually makes jobs run concurrently rather than one
-                // at a time.
-                await jobConcurrencyLimiter.WaitAsync(stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                // Host is shutting down while we were waiting for a slot. Return cleanly instead
-                // of throwing out of this handler, which RabbitMQ.Client would otherwise surface
-                // as a CallbackException on the connection.
-                return;
-            }
-
-            _ = ProcessMessageSafelyAsync(ea, stoppingToken, jobConcurrencyLimiter);
-        };
+        consumer.Received += (sender, ea) => ProcessMessageSafelyAsync(ea, stoppingToken);
         consumer.ConsumerCancelled += OnConsumerCancelledAsync;
 
         _channel.BasicConsume(
@@ -110,7 +86,7 @@ public class Worker : BackgroundService
         _logger.LogInformation("Alteva Crawl Worker shutting down gracefully...");
     }
 
-    private async Task ProcessMessageSafelyAsync(BasicDeliverEventArgs ea, CancellationToken stoppingToken, SemaphoreSlim jobConcurrencyLimiter)
+    private async Task ProcessMessageSafelyAsync(BasicDeliverEventArgs ea, CancellationToken stoppingToken)
     {
         try
         {
@@ -119,13 +95,8 @@ public class Worker : BackgroundService
         catch (Exception ex)
         {
             // ProcessMessageAsync already acks/nacks on every path it expects; this is a
-            // last-resort guard so a truly unexpected exception can't crash the dispatch loop
-            // or leak a concurrency slot.
+            // last-resort guard so a truly unexpected exception can't crash the dispatch loop.
             _logger.LogError(ex, "Unexpected exception escaped ProcessMessageAsync for delivery {DeliveryTag}.", ea.DeliveryTag);
-        }
-        finally
-        {
-            jobConcurrencyLimiter.Release();
         }
     }
 
@@ -195,12 +166,11 @@ public class Worker : BackgroundService
 
             var maxDepth = message.MaxDepth > 0 ? message.MaxDepth : 2;
             var maxPages = _configuration.GetValue<int>("MAX_PAGES_SAFETY_LIMIT", 200);
-            var maxConcurrentPages = Math.Max(1, _configuration.GetValue<int>("CRAWLER_MAX_CONCURRENT_PAGES", 5));
 
-            _logger.LogInformation("Executing crawl for Job {JobId}: {Url} (MaxDepth={MaxDepth}, MaxPages={MaxPages}, MaxConcurrentPages={MaxConcurrentPages})",
-                message.JobId, message.InputUrl, maxDepth, maxPages, maxConcurrentPages);
+            _logger.LogInformation("Executing crawl for Job {JobId}: {Url} (MaxDepth={MaxDepth}, MaxPages={MaxPages})",
+                message.JobId, message.InputUrl, maxDepth, maxPages);
 
-            var crawlResult = await crawlerEngine.CrawlAsync(message.JobId, message.InputUrl, maxDepth, maxPages, maxConcurrentPages, stoppingToken);
+            var crawlResult = await crawlerEngine.CrawlAsync(message.JobId, message.InputUrl, maxDepth, maxPages, stoppingToken);
 
             if (crawlResult.Success)
             {
@@ -373,22 +343,14 @@ public class Worker : BackgroundService
             : payload;
     }
 
-    // IModel (the channel) is not thread-safe. With multiple jobs now processed concurrently,
-    // every ack/nack must go through one of these rather than calling _channel directly.
     private void AckMessage(ulong deliveryTag)
     {
-        lock (_channelLock)
-        {
-            _channel?.BasicAck(deliveryTag, multiple: false);
-        }
+        _channel?.BasicAck(deliveryTag, multiple: false);
     }
 
     private void NackMessage(ulong deliveryTag, bool requeue)
     {
-        lock (_channelLock)
-        {
-            _channel?.BasicNack(deliveryTag, multiple: false, requeue: requeue);
-        }
+        _channel?.BasicNack(deliveryTag, multiple: false, requeue: requeue);
     }
 
     private void DeclareTopology(IModel channel, RabbitMQOptions options)
@@ -489,7 +451,6 @@ public class Worker : BackgroundService
         _channel?.Dispose();
         _connection?.Close();
         _connection?.Dispose();
-        _jobConcurrencyLimiter?.Dispose();
         base.Dispose();
     }
 }
