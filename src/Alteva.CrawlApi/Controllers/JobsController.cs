@@ -244,4 +244,47 @@ public class JobsController(
 
         return Ok(new { message = "Job canceled successfully." });
     }
+
+    /// <summary>
+    /// Deletes a crawl job and all associated pages and edges.
+    /// Only allows deletion of jobs in terminal states (Completed, Failed, Canceled).
+    /// </summary>
+    /// <param name="id">The unique GUID of the job to delete.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    [HttpDelete("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> DeleteJob(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var job = await _dbContext.Jobs.FindAsync([id], cancellationToken);
+        if (job == null)
+        {
+            return NotFound(new ProblemDetails
+            {
+                Title = "Job Not Found",
+                Detail = $"Job with ID '{id}' was not found.",
+                Status = StatusCodes.Status404NotFound
+            });
+        }
+
+        if (job.Status == JobStatus.Pending || job.Status == JobStatus.Running)
+        {
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Invalid Operation",
+                Detail = $"Job with ID '{id}' is currently '{job.Status}'. Active jobs must be canceled before they can be deleted.",
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+
+        _dbContext.Jobs.Remove(job);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        _logger.LogInformation("Job {JobId} and its associated data were deleted by user.", id);
+
+        return NoContent();
+    }
 }
