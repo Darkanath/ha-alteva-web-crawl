@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Alteva.CrawlApi/Alteva.CrawlApi.csproj" />
+    <Project Path="src/Alteva.CrawlWorker/Alteva.CrawlWorker.csproj" />
+    <Project Path="src/Alteva.Domain/Alteva.Domain.csproj" />
+    <Project Path="src/Alteva.Infrastructure/Alteva.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Alteva.CrawlApi.Tests/Alteva.CrawlApi.Tests.csproj" />
+    <Project Path="tests/Alteva.CrawlWorker.Tests/Alteva.CrawlWorker.Tests.csproj" />
+    <Project Path="tests/Alteva.Domain.UnitTests/Alteva.Domain.UnitTests.csproj" />
+    <Project Path="tests/Alteva.Infrastructure.Tests/Alteva.Infrastructure.Tests.csproj" />
+  </Folder>
+</Solution>

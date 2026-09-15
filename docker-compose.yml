@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  # RabbitMQ Message Broker
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: alteva-rabbitmq
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"               # AMQP protocol port
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672" # Management UI port
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER:-guest}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS:-guest}"
+    # Using alpine image for smaller footprint and management plugin for easy UI debugging
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # SQL Server Database
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: alteva-sqlserver
+    ports:
+      - "${SQL_SERVER_PORT:-1433}:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${SQL_SERVER_PASSWORD}"
+    # Using latest SQL Server 2022 for EF Core compatibility and robust relational storage
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U ${SQL_SERVER_USER:-sa} -P \"$${SQL_SERVER_PASSWORD}\" -Q \"SELECT 1\" -No || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # The main Web API that receives crawl requests
+  crawl-api:
+    build: 
+      context: .
+      dockerfile: src/Alteva.CrawlApi/Dockerfile
+    container_name: alteva-api
+    ports:
+      - "${API_PORT:-8080}:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=${SQL_SERVER_DATABASE:-AltevaCrawlDb};User Id=${SQL_SERVER_USER:-sa};Password=${SQL_SERVER_PASSWORD};TrustServerCertificate=True;
+      - RabbitMQ__Host=${RABBITMQ_HOST:-rabbitmq}
+      - RabbitMQ__Username=${RABBITMQ_DEFAULT_USER:-guest}
+      - RabbitMQ__Password=${RABBITMQ_DEFAULT_PASS:-guest}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      sqlserver:
+        condition: service_healthy
+
+  # The background worker that processes crawl jobs
+  crawl-worker:
+    build: 
+      context: .
+      dockerfile: src/Alteva.CrawlWorker/Dockerfile
+    container_name: alteva-worker
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=${SQL_SERVER_DATABASE:-AltevaCrawlDb};User Id=${SQL_SERVER_USER:-sa};Password=${SQL_SERVER_PASSWORD};TrustServerCertificate=True;
+      - RabbitMQ__Host=${RABBITMQ_HOST:-rabbitmq}
+      - RabbitMQ__Username=${RABBITMQ_DEFAULT_USER:-guest}
+      - RabbitMQ__Password=${RABBITMQ_DEFAULT_PASS:-guest}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      sqlserver:
+        condition: service_healthy

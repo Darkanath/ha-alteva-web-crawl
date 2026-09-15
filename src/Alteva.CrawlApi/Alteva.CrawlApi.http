@@ -1,0 +1,6 @@
+@Alteva.CrawlApi_HostAddress = http://localhost:5116
+
+GET {{Alteva.CrawlApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
