@@ -198,7 +198,7 @@ Secrets come only from `.env` (git-ignored); `.env.example` holds placeholders.
 
 ### What I cut, and why
 - **Parallel crawling / multiple workers:** a single sequential consumer removes a whole class of race conditions and makes breadth-first order free. Politeness mattered more than speed.
-- **Transactional outbox:** publisher confirms plus "mark the job `Failed` if the root cannot be published" and "re-publish queued children on redelivery" cover the same failure modes more simply.
+- **Transactional outbox:** the usual way to make "save to the database and publish a message" reliable. The worker doesn't need one: it acks a page only after publishing its children, and a redelivered page re-publishes any children still `Queued`. The API covers a failed root publish (the job is marked `Failed`, 503), but not a crash between saving the job and publishing its root message, which would leave that job `Pending` forever. I accepted that small window to keep the design simple.
 - **SSE/SignalR progress:** polling every 3 s is sufficient.
 - **robots.txt, SSRF guard, a real HTML parser:** valuable, but not required for the core flow; listed under limitations.
 
@@ -206,7 +206,8 @@ Secrets come only from `.env` (git-ignored); `.env.example` holds placeholders.
 1. **SSRF protection:** resolve hosts and block private, loopback and link-local ranges, re-checking after redirects.
 2. **robots.txt and `Crawl-delay`;** stop following redirects to other hosts; honour `<base href>`; use a real HTML parser (e.g. AngleSharp).
 3. **Integration tests on real infrastructure** (Testcontainers for SQL Server and RabbitMQ), plus the smoke scenarios as an automated CI job.
-4. **Scale-out:** multiple workers with per-domain rate limiting and a partial tree for cancelled jobs.
+4. **Close the API's publish gap:** a small background re-publisher that finds jobs still `Pending` after a couple of minutes with their root page `Queued` and publishes the root message again. The `Queued` page row already records that a message is owed, so no extra table is needed, and duplicate messages are harmless because the worker drops them. If more message types appear, move to a full outbox: an `OutboxMessages` table written in the same transaction as the job, plus a relay that publishes pending rows and marks them sent.
+5. **Scale-out:** multiple workers with per-domain rate limiting and a partial tree for cancelled jobs.
 
 ---
 
