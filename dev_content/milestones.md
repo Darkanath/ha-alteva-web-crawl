@@ -77,7 +77,7 @@ gantt
 ---
 
 ## Milestone 5: Observability, Docker Delivery & Final Documentation
-- **Status:** Planned
+- **Status:** Complete (100%)
 - **Target:** End-to-end multi-container orchestration, structured logging, health endpoints, and comprehensive README.
 - **Key Deliverables:**
   - Health checks (`/health`) on both API and Worker.

@@ -122,5 +122,5 @@
   - [x] Create sanitized `.env.example` with placeholders and local `.env`.
 - [x] **Task 7.3: Docker Compose End-to-End Run**
   - [x] Verify SQL Server, RabbitMQ, API, and Worker spin up and communicate cleanly.
-- [ ] **Task 7.4: Submission Documentation**
-  - [ ] Document run instructions, architectural decisions, idempotency strategy, and trade-offs.
+- [x] **Task 7.4: Submission Documentation**
+  - [x] Document run instructions, architectural decisions, idempotency strategy, and trade-offs.
