@@ -69,12 +69,12 @@
   - [x] Visited URL deduplication set.
   - [x] Max pages safety cutoff (default 200).
   - [x] Error handling for HTTP status codes and timeouts.
-- [ ] **Task 4.2: RabbitMQ Background Consumer**
-  - [ ] Consume `CrawlJobRequestedMessage` from queue with prefetch limit.
-  - [ ] Update Job status to `Running` with `StartedAt` timestamp.
-  - [ ] Save discovered pages and edges to database in batches or transaction.
-  - [ ] Update Job status to `Completed` or `Failed` with `CompletedAt`.
-  - [ ] Implement retry policy for transient DB/network errors; forward to DLQ upon exhaustion.
+- [x] **Task 4.2: RabbitMQ Background Consumer**
+  - [x] Consume `CrawlJobRequestedMessage` from queue with prefetch limit (`BasicQos(0, 1, false)`).
+  - [x] Update Job status to `Running` with `StartedAt` timestamp.
+  - [x] Save discovered pages and edges to database in batches or transaction.
+  - [x] Update Job status to `Completed` or `Failed` with `CompletedAt`.
+  - [x] Implement retry policy for transient DB/network errors; forward to DLQ upon exhaustion.
 
 ---
 
@@ -102,7 +102,7 @@
 - [x] **Task 6.2: Infrastructure Tests (`Alteva.Infrastructure.Tests`)**
   - [x] 4 tests verifying unique index idempotency and cascade delete constraints via in-memory SQLite.
 - [x] **Task 6.3: Worker Tests (`Alteva.CrawlWorker.Tests`)**
-  - [x] 6 tests including integration-style crawling test using multi-level local HTML fixtures.
+  - [x] 9 tests covering integration-style crawling with local HTML fixtures, consumer state transitions, and idempotent persistence.
 - [x] **Task 6.4: API Tests (`Alteva.CrawlApi.Tests`)**
   - [x] 10 tests validating request payload rules and constraints.
 - [x] **Task 6.5: Frontend Tests (`frontend`)**
@@ -120,7 +120,7 @@
   - [x] Parameterize `docker-compose.yml` to ingest credentials exclusively via environment variables.
   - [x] Remove all hardcoded fallback connection strings and passwords from source code (`Program.cs`).
   - [x] Create sanitized `.env.example` with placeholders and local `.env`.
-- [ ] **Task 7.3: Docker Compose End-to-End Run**
-  - [ ] Verify SQL Server, RabbitMQ, API, and Worker spin up and communicate cleanly.
+- [x] **Task 7.3: Docker Compose End-to-End Run**
+  - [x] Verify SQL Server, RabbitMQ, API, and Worker spin up and communicate cleanly.
 - [ ] **Task 7.4: Submission Documentation**
   - [ ] Document run instructions, architectural decisions, idempotency strategy, and trade-offs.
