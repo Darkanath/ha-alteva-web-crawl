@@ -18,5 +18,6 @@ public interface ICrawlerEngine
         string rootUrl,
         int maxDepth = 2,
         int maxPages = 200,
+        int maxConcurrency = 5,
         CancellationToken cancellationToken = default);
 }
