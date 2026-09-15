@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # RabbitMQ Message Broker
   rabbitmq:
@@ -29,7 +27,7 @@ services:
       MSSQL_SA_PASSWORD: "${SQL_SERVER_PASSWORD}"
     # Using latest SQL Server 2022 for EF Core compatibility and robust relational storage
     healthcheck:
-      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U ${SQL_SERVER_USER:-sa} -P \"$${SQL_SERVER_PASSWORD}\" -Q \"SELECT 1\" -No || exit 1"]
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" -No -C || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -45,7 +43,8 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
       - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=${SQL_SERVER_DATABASE:-AltevaCrawlDb};User Id=${SQL_SERVER_USER:-sa};Password=${SQL_SERVER_PASSWORD};TrustServerCertificate=True;
-      - RabbitMQ__Host=${RABBITMQ_HOST:-rabbitmq}
+      - RabbitMQ__Host=rabbitmq
+      - RabbitMQ__Port=5672
       - RabbitMQ__Username=${RABBITMQ_DEFAULT_USER:-guest}
       - RabbitMQ__Password=${RABBITMQ_DEFAULT_PASS:-guest}
     depends_on:
@@ -63,7 +62,8 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Development}
       - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=${SQL_SERVER_DATABASE:-AltevaCrawlDb};User Id=${SQL_SERVER_USER:-sa};Password=${SQL_SERVER_PASSWORD};TrustServerCertificate=True;
-      - RabbitMQ__Host=${RABBITMQ_HOST:-rabbitmq}
+      - RabbitMQ__Host=rabbitmq
+      - RabbitMQ__Port=5672
       - RabbitMQ__Username=${RABBITMQ_DEFAULT_USER:-guest}
       - RabbitMQ__Password=${RABBITMQ_DEFAULT_PASS:-guest}
     depends_on:
